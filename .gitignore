@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Logs
+log/
+logs/
+*.log
+
+# Runtime files
+files/
+*.parquet
+
+# Environment files - DB password can be inside
+.env
+.env.dev
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+
+# AI model files - sensitive / large
+model/

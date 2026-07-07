@@ -1,0 +1,337 @@
+"""AI 추론 처리 모듈
+
+현재 파일은 실제 AI 모델 연결 전까지 사용하는 임시 추론 코드다.
+
+새 결과 DB 규격에 맞춰서 아래 형태로 결과를 반환한다.
+
+반환 핵심 필드:
+    - serial_number
+    - sensing_datetime
+    - prediction_time
+    - bank_no
+    - rack_no
+    - string_no
+    - module_no
+    - cell_1_score ~ cell_20_score
+
+점수 범위:
+    - 0.00 ~ 1.00
+
+주의:
+    현재 점수는 실제 AI 모델 결과가 아니라 테스트용 임시 점수다.
+"""
+
+import random
+from datetime import date, datetime
+from typing import Dict, List, Optional, Tuple
+
+
+def ai_process(data: List[dict]) -> List[dict]:
+    """AI 추론 메인 함수
+
+    Args:
+        data:
+            전처리된 배터리 데이터 목록
+
+    Returns:
+        anomaly_score 테이블에 저장 가능한 AI 결과 목록
+
+    현재 결과 단위:
+        site_no + bms_id + rack_no + module_no 단위로 1 row 생성
+
+    참고:
+        관제 시스템이 1분 단위 결과를 원하면
+        나중에 group key에 sensing_datetime까지 포함하도록 바꾸면 된다.
+    """
+
+    if not data:
+        return []
+
+    prediction_time = datetime.now()
+    module_groups = _group_by_module(data)
+
+    results: List[dict] = []
+
+    for group_key, rows in module_groups.items():
+        site_no, bms_id, rack_no, module_no = group_key
+
+        first_row = rows[0]
+
+        sensing_datetime = _get_sensing_datetime(rows)
+        target_date = _get_target_date(rows, sensing_datetime=sensing_datetime)
+
+        bank_no = _safe_int(
+            first_row.get("bank_no") or first_row.get("bank_number"),
+            default=0,
+        )
+
+        string_no = _safe_int(
+            first_row.get("string_no") or first_row.get("string_number"),
+            default=0,
+        )
+
+        serial_number = _safe_str(
+            first_row.get("serial_number")
+            or first_row.get("serial_no")
+            or first_row.get("ess_serial_number")
+            or first_row.get("bms_id")
+            or first_row.get("dvc_id"),
+            default=bms_id or "UNKNOWN",
+        )
+
+        result = {
+            # 내부 관리/조회용
+            "site_no": site_no,
+            "bms_id": bms_id,
+            "target_date": target_date,
+            "date": target_date,
+
+            # 관제 시스템 전달 규격
+            "serial_number": serial_number,
+            "sensing_datetime": sensing_datetime,
+            "date_time": sensing_datetime,
+            "prediction_time": prediction_time,
+
+            "bank_no": bank_no,
+            "rack_no": rack_no,
+            "string_no": string_no,
+            "module_no": module_no,
+
+            # 기존 코드 일부 호환용
+            "rack_idx": rack_no,
+            "index": rack_no,
+        }
+
+        for cell_idx in range(1, 21):
+            result[f"cell_{cell_idx}_score"] = _make_dummy_score(
+                rows=rows,
+                cell_idx=cell_idx,
+            )
+
+        results.append(result)
+
+    results.sort(
+        key=lambda item: (
+            _safe_int(item.get("site_no")),
+            str(item.get("bms_id") or ""),
+            _safe_int(item.get("bank_no")),
+            _safe_int(item.get("rack_no")),
+            _safe_int(item.get("string_no")),
+            _safe_int(item.get("module_no")),
+        )
+    )
+
+    return results
+
+
+def _group_by_module(data: List[dict]) -> Dict[Tuple[int, str, int, int], List[dict]]:
+    """입력 데이터를 site_no / bms_id / rack_no / module_no 기준으로 묶는다."""
+
+    groups: Dict[Tuple[int, str, int, int], List[dict]] = {}
+
+    for item in data:
+        site_no = _safe_int(item.get("site_no"), default=0)
+
+        bms_id = _safe_str(
+            item.get("bms_id") or item.get("dvc_id"),
+            default="UNKNOWN",
+        )
+
+        rack_no = _safe_int(
+            item.get("rack_no")
+            or item.get("rack_number")
+            or item.get("rack_idx")
+            or item.get("index"),
+            default=0,
+        )
+
+        module_no = _safe_int(
+            item.get("module_no") or item.get("module_number"),
+            default=0,
+        )
+
+        key = (
+            site_no,
+            bms_id,
+            rack_no,
+            module_no,
+        )
+
+        groups.setdefault(key, []).append(item)
+
+    return groups
+
+
+def _make_dummy_score(
+    rows: List[dict],
+    cell_idx: int,
+) -> float:
+    """임시 cell 이상 점수를 생성한다.
+
+    현재는 완전 랜덤이 아니라,
+    cell voltage 값이 없거나 비정상 범위일 때 점수가 높게 나오도록 만든다.
+
+    실제 AI 모델이 연결되면 이 함수는 제거하거나 inference 결과로 대체한다.
+    """
+
+    voltage_values = []
+
+    for row in rows:
+        value = row.get(f"cv_{cell_idx}")
+
+        if value is None:
+            continue
+
+        try:
+            voltage_values.append(float(value))
+        except (TypeError, ValueError):
+            continue
+
+    if not voltage_values:
+        return round(random.uniform(0.70, 0.95), 2)
+
+    avg_voltage = sum(voltage_values) / len(voltage_values)
+
+    if avg_voltage <= 0:
+        score = random.uniform(0.85, 0.98)
+    elif avg_voltage < 1.5:
+        score = random.uniform(0.55, 0.82)
+    elif avg_voltage > 5.0:
+        score = random.uniform(0.55, 0.82)
+    else:
+        score = random.uniform(0.01, 0.35)
+
+    return _normalize_score(score)
+
+
+def _get_sensing_datetime(rows: List[dict]) -> datetime:
+    """그룹 안에서 대표 센싱 시간을 가져온다.
+
+    우선순위:
+        1. measured_at 중 가장 최근 시간
+        2. sensing_datetime 중 가장 최근 시간
+        3. date_time 중 가장 최근 시간
+        4. 현재 시간
+
+    현재 파이프라인은 하루치 데이터를 모아서 module 단위 결과를 만들기 때문에
+    대표 시간은 해당 module 데이터의 가장 최근 measured_at으로 둔다.
+    """
+
+    candidates: List[datetime] = []
+
+    for row in rows:
+        for key in ("measured_at", "sensing_datetime", "date_time"):
+            value = _to_datetime(row.get(key))
+
+            if value is not None:
+                candidates.append(value)
+
+    if candidates:
+        return max(candidates)
+
+    return datetime.now()
+
+
+def _get_target_date(
+    rows: List[dict],
+    sensing_datetime: datetime,
+) -> date:
+    """분석 대상 날짜를 가져온다."""
+
+    for row in rows:
+        value = row.get("target_date") or row.get("date")
+
+        parsed = _to_date(value)
+
+        if parsed is not None:
+            return parsed
+
+    return sensing_datetime.date()
+
+
+def _normalize_score(value) -> float:
+    """0.00~1.00 범위의 소수 2자리 점수로 변환한다."""
+
+    if value is None:
+        return 0.0
+
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+    if score > 1:
+        score = score / 100.0
+
+    if score < 0:
+        score = 0.0
+
+    if score > 1:
+        score = 1.0
+
+    return round(score, 2)
+
+
+def _safe_str(value, default: str = "") -> str:
+    """값을 안전하게 문자열로 변환한다."""
+
+    if value is None:
+        return default
+
+    text = str(value).strip()
+
+    if not text:
+        return default
+
+    return text
+
+
+def _safe_int(value, default: int = 0) -> int:
+    """값을 안전하게 int로 변환한다."""
+
+    if value is None:
+        return default
+
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _to_datetime(value) -> Optional[datetime]:
+    """값을 datetime으로 변환한다."""
+
+    if value is None:
+        return None
+
+    if isinstance(value, datetime):
+        return value
+
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            return None
+
+    return None
+
+
+def _to_date(value) -> Optional[date]:
+    """값을 date로 변환한다."""
+
+    if value is None:
+        return None
+
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return value
+
+    if isinstance(value, datetime):
+        return value.date()
+
+    if isinstance(value, str):
+        try:
+            return date.fromisoformat(value)
+        except ValueError:
+            return None
+
+    return None

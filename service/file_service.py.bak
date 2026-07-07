@@ -1,0 +1,220 @@
+"""Parquet 파일 저장 서비스"""
+
+import json
+import logging
+import shutil
+from datetime import date, datetime, timedelta
+from pathlib import Path
+from typing import Any, List, Optional
+
+import pandas as pd
+
+from core.setting import Settings
+
+
+logger = logging.getLogger("app")
+
+
+class FileService:
+    """AI 분석용 데이터를 Parquet 파일로 누적 저장하는 서비스
+
+    저장 구조:
+        files/
+        ├── raw/{ess_id}/{YYYY-MM-DD}/battery_raw.parquet
+        ├── preprocessed/{ess_id}/{YYYY-MM-DD}/battery_preprocessed.parquet
+        └── result/{ess_id}/{YYYY-MM-DD}/anomaly_scores.parquet
+
+    보관 정책:
+        - raw 데이터는 원본 재현용이므로 자동 삭제하지 않는다.
+        - result 데이터는 결과 검수용이므로 자동 삭제하지 않는다.
+        - preprocessed 데이터는 raw에서 다시 만들 수 있으므로 일정 기간 후 자동 삭제한다.
+    """
+
+    def __init__(self, settings: Settings):
+        self._settings = settings
+        self._root_dir = settings.files_dir_path
+        logger.info(f"✅ FileService 초기화 완료: {self._root_dir}")
+
+    def save_raw(
+            self,
+            data: List[dict],
+            target_date: date,
+            ess_id: Optional[str] = None,
+    ) -> str:
+        """관제시스템 DB에서 조회한 원본 데이터를 저장한다."""
+        return self._save_parquet(
+            data=data,
+            data_type="raw",
+            target_date=target_date,
+            file_name="battery_raw.parquet",
+            ess_id=ess_id,
+        )
+
+    def save_preprocessed(
+            self,
+            data: List[dict],
+            target_date: date,
+            ess_id: Optional[str] = None,
+    ) -> str:
+        """전처리 데이터를 저장한다.
+
+        현재는 실제 전처리 로직이 없으므로 raw와 동일한 데이터를 저장한다.
+        실제 AI 모델 연결 시 전처리 결과를 이 함수에 넘기면 된다.
+        """
+        return self._save_parquet(
+            data=data,
+            data_type="preprocessed",
+            target_date=target_date,
+            file_name="battery_preprocessed.parquet",
+            ess_id=ess_id,
+        )
+
+    def save_result(
+            self,
+            data: List[dict],
+            target_date: date,
+            ess_id: Optional[str] = None,
+    ) -> str:
+        """AI 이상 점수 결과를 저장한다.
+
+        참고:
+            save_raw / save_preprocessed와 동일하게 파라미터명을 data로 통일했다.
+            (기존 scores 파라미터명은 schedule_service의 data= 키워드 호출과
+            불일치해서 TypeError가 발생했다.)
+        """
+        return self._save_parquet(
+            data=data,
+            data_type="result",
+            target_date=target_date,
+            file_name="anomaly_scores.parquet",
+            ess_id=ess_id,
+        )
+
+    def save(
+            self,
+            data: List[dict],
+            target_date: date,
+            ess_id: Optional[str] = None,
+    ) -> str:
+        """기존 코드 호환용 함수
+
+        예전 schedule_service.py에서 self._report.save(...)를 호출하던 구조를
+        유지하기 위한 함수다.
+
+        새 코드에서는 save_raw(...)를 직접 호출하는 것을 권장한다.
+        """
+        return self.save_raw(data=data, target_date=target_date, ess_id=ess_id)
+
+    def cleanup_old_preprocessed(self) -> int:
+        """보관 기간이 지난 preprocessed 데이터를 삭제한다.
+
+        삭제 대상:
+            files/preprocessed/{ess_id}/{YYYY-MM-DD}/
+
+        기준:
+            오늘 날짜 - PREPROCESSED_RETENTION_DAYS 보다 오래된 날짜 폴더 삭제
+
+        Returns:
+            삭제한 날짜 폴더 개수
+        """
+        retention_days = self._settings.PREPROCESSED_RETENTION_DAYS
+
+        if retention_days <= 0:
+            logger.info(
+                f"ℹ️ preprocessed 자동 삭제 비활성화 "
+                f"[PREPROCESSED_RETENTION_DAYS={retention_days}]"
+            )
+            return 0
+
+        preprocessed_root = self._root_dir / "preprocessed"
+
+        if not preprocessed_root.exists():
+            logger.info("ℹ️ preprocessed 폴더 없음 - 삭제할 데이터 없음")
+            return 0
+
+        cutoff_date = date.today() - timedelta(days=retention_days)
+        deleted_count = 0
+
+        for ess_dir in preprocessed_root.iterdir():
+            if not ess_dir.is_dir():
+                continue
+
+            for date_dir in ess_dir.iterdir():
+                if not date_dir.is_dir():
+                    continue
+
+                try:
+                    folder_date = datetime.strptime(date_dir.name, "%Y-%m-%d").date()
+                except ValueError:
+                    logger.warning(f"⚠️ 날짜 형식이 아닌 폴더는 삭제 생략: {date_dir}")
+                    continue
+
+                if folder_date < cutoff_date:
+                    shutil.rmtree(date_dir)
+                    deleted_count += 1
+                    logger.info(
+                        f"🧹 오래된 preprocessed 데이터 삭제 완료 "
+                        f"[path={date_dir}, folder_date={folder_date}, cutoff={cutoff_date}]"
+                    )
+
+        logger.info(
+            f"✅ preprocessed 자동 정리 완료 "
+            f"[retention_days={retention_days}, deleted_count={deleted_count}]"
+        )
+
+        return deleted_count
+
+    def _save_parquet(
+            self,
+            data: List[dict],
+            data_type: str,
+            target_date: date,
+            file_name: str,
+            ess_id: Optional[str] = None,
+    ) -> str:
+        """공통 Parquet 저장 함수"""
+        safe_ess_id = self._safe_name(ess_id or self._settings.DEFAULT_ESS_ID)
+        date_text = target_date.isoformat()
+
+        save_dir = self._root_dir / data_type / safe_ess_id / date_text
+        save_dir.mkdir(parents=True, exist_ok=True)
+
+        file_path = save_dir / file_name
+
+        df = pd.DataFrame(data)
+        df.to_parquet(file_path, index=False)
+
+        metadata = {
+            "ess_id": safe_ess_id,
+            "target_date": date_text,
+            "data_type": data_type,
+            "file_name": file_name,
+            "file_path": str(file_path),
+            "row_count": len(data),
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+        }
+
+        metadata_path = save_dir / "metadata.json"
+        with metadata_path.open("w", encoding="utf-8") as f:
+            json.dump(metadata, f, ensure_ascii=False, indent=2)
+
+        logger.info(
+            f"✅ Parquet 저장 완료 "
+            f"[type={data_type}, ess_id={safe_ess_id}, date={date_text}, "
+            f"rows={len(data)}, path={file_path}]"
+        )
+
+        return str(file_path)
+
+    def _safe_name(self, value: Any) -> str:
+        """폴더명으로 안전하게 사용할 수 있도록 문자열 정리"""
+        text = str(value).strip()
+
+        if not text:
+            return self._settings.DEFAULT_ESS_ID
+
+        # Windows/Linux 경로에서 문제가 될 수 있는 문자 제거
+        for ch in ['\\', '/', ':', '*', '?', '"', '<', '>', '|', ' ']:
+            text = text.replace(ch, "_")
+
+        return text

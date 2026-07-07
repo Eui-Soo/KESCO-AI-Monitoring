@@ -1,0 +1,103 @@
+{
+  "generated_at": "2026-07-07T09:37:35",
+  "target_db": "kesco_monitoring_fake",
+  "config": {
+    "random_seed": 42,
+    "interval_minutes": 1,
+    "days": 92
+  },
+  "period": {
+    "start": "2026-04-05",
+    "end": "2026-07-05"
+  },
+  "sites": [
+    {
+      "site_no": 1,
+      "site_name": "대전 본원 ESS",
+      "bms_id": "BMS001",
+      "rack_cnt": 2,
+      "modules_per_rack": 2,
+      "label": "normal",
+      "sensor_fault": {
+        "rack_no": 1,
+        "module_no": 2,
+        "cell_no": 13,
+        "note": "전 기간 해당 셀 NULL (화재 아님)"
+      }
+    },
+    {
+      "site_no": 2,
+      "site_name": "세종 지사 ESS",
+      "bms_id": "BMS002",
+      "rack_cnt": 2,
+      "modules_per_rack": 4,
+      "label": "fire",
+      "fire": {
+        "incipient_start": "2026-05-21",
+        "fire_datetime": "2026-06-04T10:29:00",
+        "rack_no": 2,
+        "module_no": 1,
+        "cells": [
+          18,
+          19
+        ],
+        "note": "잠복기부터 셀 전압 점진 하락, 발화 45분 전 열폭주, 발화 후 데이터 두절",
+        "detection_hint": "이 화재는 '점진적 시계열 열화'라 현재 더미 ai_process(하루 평균 전압 기준)로는 탐지되지 않는 것이 정상이다. 실제 시계열 AI 모델을 붙였을 때 incipient_start 이후를 며칠 전에 예측하는지 평가하는 용도의 정답 라벨이다."
+      }
+    },
+    {
+      "site_no": 3,
+      "site_name": "청주 물류센터 ESS",
+      "bms_id": "BMS003",
+      "rack_cnt": 2,
+      "modules_per_rack": 2,
+      "label": "fault",
+      "fault": {
+        "start_date": "2026-05-30",
+        "rack_no": 1,
+        "module_no": 1,
+        "cells": [
+          7,
+          8
+        ],
+        "note": "불량시작일부터 모듈 온도 상승 + 셀 전압 편차 지속 (화재는 아님)"
+      }
+    },
+    {
+      "site_no": 4,
+      "site_name": "전주 공장 ESS",
+      "bms_id": "BMS004",
+      "rack_cnt": 2,
+      "modules_per_rack": 4,
+      "label": "normal"
+    },
+    {
+      "site_no": 5,
+      "site_name": "부산 항만 ESS",
+      "bms_id": "BMS005",
+      "rack_cnt": 3,
+      "modules_per_rack": 2,
+      "label": "fire",
+      "fire": {
+        "incipient_start": "2026-05-27",
+        "fire_datetime": "2026-06-10T13:44:00",
+        "rack_no": 1,
+        "module_no": 1,
+        "cells": [
+          19,
+          20
+        ],
+        "note": "잠복기부터 셀 전압 점진 하락, 발화 45분 전 열폭주, 발화 후 데이터 두절",
+        "detection_hint": "이 화재는 '점진적 시계열 열화'라 현재 더미 ai_process(하루 평균 전압 기준)로는 탐지되지 않는 것이 정상이다. 실제 시계열 AI 모델을 붙였을 때 incipient_start 이후를 며칠 전에 예측하는지 평가하는 용도의 정답 라벨이다."
+      }
+    },
+    {
+      "site_no": 6,
+      "site_name": "광주 데이터센터 ESS",
+      "bms_id": "BMS006",
+      "rack_cnt": 3,
+      "modules_per_rack": 3,
+      "label": "normal"
+    }
+  ]
+}

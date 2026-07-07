@@ -1,0 +1,539 @@
+"""AI 파이프라인 스케줄러 서비스
+
+이 파일은 AI 파이프라인 실행 흐름을 담당한다.
+
+주요 기능:
+    1. 하루에 한 번 사용자가 설정한 시간에 자동 실행
+    2. Swagger/API를 통한 수동 실행
+    3. 관제 DB 원본 데이터 조회
+    4. raw / preprocessed / result Parquet 저장
+    5. AI 처리 실행
+    6. anomaly_score DB 저장
+    7. pipeline_run_log 기록
+
+실행 시간 설정:
+    .env.dev 또는 .env에서 아래 값으로 설정한다.
+
+    SCHEDULE_HOUR=0
+    SCHEDULE_MINUTE=0
+    SCHEDULE_SECOND=30
+
+예:
+    매일 새벽 2시 30분 실행:
+        SCHEDULE_HOUR=2
+        SCHEDULE_MINUTE=30
+        SCHEDULE_SECOND=0
+"""
+
+import logging
+from datetime import date, datetime, timedelta
+from typing import Dict, List, Optional
+
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
+from core.setting import Settings
+from service.ai_service import AIProcessingService
+from service.file_service import FileService
+
+
+logger = logging.getLogger("app")
+
+
+class SchedulerService:
+    """AI 파이프라인 스케줄러 서비스"""
+
+    def __init__(
+        self,
+        settings: Settings,
+        remote_db_service,
+        db_local_service,
+        file_service: FileService,
+        ai_processing_service: AIProcessingService,
+    ):
+        self._settings = settings
+        self._remote_db_service = remote_db_service
+        self._db_local_service = db_local_service
+        self._file_service = file_service
+        self._ai_processing_service = ai_processing_service
+
+        self._scheduler = AsyncIOScheduler()
+        self._is_running = False
+
+        logger.info("✅ SchedulerService 초기화 완료")
+
+    def start(self) -> None:
+        """스케줄러 시작
+
+        이 서버는 하루에 한 번만 자동 실행되도록 cron trigger를 사용한다.
+
+        실행 시간은 .env.dev 또는 .env에서 설정한다.
+
+        예:
+            SCHEDULE_HOUR=2
+            SCHEDULE_MINUTE=30
+            SCHEDULE_SECOND=0
+
+            -> 매일 02:30:00에 실행
+        """
+
+        if self._scheduler.running:
+            logger.warning("⚠️ 스케줄러가 이미 실행 중입니다.")
+            return
+
+        self._scheduler.add_job(
+            self._process_all_active_targets,
+            trigger="cron",
+            hour=self._settings.SCHEDULE_HOUR,
+            minute=self._settings.SCHEDULE_MINUTE,
+            second=self._settings.SCHEDULE_SECOND,
+            id="daily_ai_pipeline",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=3600,
+        )
+
+        self._scheduler.start()
+
+        logger.info(
+            "✅ 스케줄러 시작 완료 "
+            f"(매일 {self._settings.SCHEDULE_HOUR:02d}:"
+            f"{self._settings.SCHEDULE_MINUTE:02d}:"
+            f"{self._settings.SCHEDULE_SECOND:02d} 실행)"
+        )
+
+    def stop(self) -> None:
+        """스케줄러 종료"""
+
+        if not self._scheduler.running:
+            logger.info("스케줄러가 실행 중이 아닙니다.")
+            return
+
+        self._scheduler.shutdown(wait=False)
+        logger.info("✅ 스케줄러 종료 완료")
+
+    async def run_once(
+        self,
+        target_date: Optional[date] = None,
+        site_no: Optional[int] = None,
+        bms_id: Optional[str] = None,
+    ) -> Dict:
+        """AI 파이프라인을 수동으로 1회 실행한다.
+
+        Swagger에서 사용하는 수동 실행 함수다.
+
+        사용 예:
+            POST /api/v1/pipeline/run
+            POST /api/v1/pipeline/run?date=2026-07-05
+            POST /api/v1/pipeline/run?site_no=1&bms_id=BMS001
+            POST /api/v1/pipeline/run?date=2026-07-05&site_no=1&bms_id=BMS001
+        """
+
+        if self._is_running:
+            logger.warning("⚠️ 이전 AI 파이프라인이 아직 실행 중입니다.")
+            return {
+                "status": "skipped",
+                "message": "Previous AI pipeline is still running.",
+                "site_no": site_no,
+                "bms_id": bms_id,
+            }
+
+        if target_date is None:
+            target_date = self._get_target_date()
+
+        # 특정 site_no / bms_id만 수동 실행
+        if site_no is not None and bms_id:
+            self._is_running = True
+
+            try:
+                return await self._run_pipeline(
+                    manual=True,
+                    target_date=target_date,
+                    site_no=site_no,
+                    bms_id=bms_id,
+                )
+
+            finally:
+                self._is_running = False
+
+        # site_no / bms_id가 없으면 로컬 DB에 등록된 전체 AI 대상 실행
+        return await self._run_all_active_targets(
+            manual=True,
+            target_date=target_date,
+        )
+
+    async def _process_all_active_targets(self) -> None:
+        """스케줄러가 매일 1회 호출하는 자동 실행 함수"""
+
+        if self._is_running:
+            logger.warning("⚠️ 이전 AI 파이프라인이 아직 실행 중이므로 자동 실행을 건너뜁니다.")
+            return
+
+        target_date = self._get_target_date()
+
+        logger.info(
+            "⏰ 일일 AI 파이프라인 자동 실행 시작 "
+            f"(target_date={target_date}, "
+            f"schedule={self._settings.SCHEDULE_HOUR:02d}:"
+            f"{self._settings.SCHEDULE_MINUTE:02d}:"
+            f"{self._settings.SCHEDULE_SECOND:02d})"
+        )
+
+        await self._run_all_active_targets(
+            manual=False,
+            target_date=target_date,
+        )
+
+    async def _run_all_active_targets(
+        self,
+        manual: bool,
+        target_date: date,
+    ) -> Dict:
+        """로컬 DB에 등록된 AI 분석 대상 전체를 순차 실행한다."""
+
+        self._is_running = True
+
+        try:
+            targets = await self._db_local_service.find_active_ai_targets()
+
+            if not targets:
+                logger.warning("⚠️ AI 분석 대상 사이트/BMS가 없습니다.")
+
+                return {
+                    "status": "empty",
+                    "message": (
+                        "No active AI targets found. "
+                        "Run POST /api/v1/sites/sync first."
+                    ),
+                    "target_date": target_date.isoformat(),
+                    "target_count": 0,
+                    "results": [],
+                }
+
+            logger.info(
+                "▶ 전체 AI 분석 대상 실행 시작 "
+                f"(target_date={target_date}, target_count={len(targets)})"
+            )
+
+            results: List[Dict] = []
+
+            for target in targets:
+                site_no = target.get("site_no")
+                bms_id = target.get("bms_id") or target.get("dvc_id")
+
+                if site_no is None or not bms_id:
+                    results.append(
+                        {
+                            "status": "skipped",
+                            "message": "Invalid target. site_no or bms_id is missing.",
+                            "target": target,
+                        }
+                    )
+                    continue
+
+                result = await self._run_pipeline(
+                    manual=manual,
+                    target_date=target_date,
+                    site_no=int(site_no),
+                    bms_id=str(bms_id),
+                )
+
+                results.append(result)
+
+            success_count = sum(1 for item in results if item.get("status") == "success")
+            empty_count = sum(1 for item in results if item.get("status") == "empty")
+            error_count = sum(1 for item in results if item.get("status") == "error")
+            skipped_count = sum(1 for item in results if item.get("status") == "skipped")
+
+            overall_status = "success"
+
+            if error_count > 0:
+                overall_status = "partial_error"
+
+            if success_count == 0 and error_count == 0 and empty_count > 0:
+                overall_status = "empty"
+
+            return {
+                "status": overall_status,
+                "message": "AI pipeline completed for active targets.",
+                "target_date": target_date.isoformat(),
+                "target_count": len(targets),
+                "success_count": success_count,
+                "empty_count": empty_count,
+                "error_count": error_count,
+                "skipped_count": skipped_count,
+                "results": results,
+            }
+
+        finally:
+            self._is_running = False
+
+    async def _run_pipeline(
+        self,
+        manual: bool,
+        target_date: date,
+        site_no: int,
+        bms_id: str,
+    ) -> Dict:
+        """특정 site_no / bms_id 기준으로 AI 파이프라인 1회를 실행한다."""
+
+        ess_id = self._make_ess_id(site_no=site_no, bms_id=bms_id)
+
+        run_id: Optional[int] = None
+        raw_file_path: Optional[str] = None
+        preprocessed_file_path: Optional[str] = None
+        result_file_path: Optional[str] = None
+
+        battery_count = 0
+        saved_score_count = 0
+        deleted_preprocessed_count = 0
+
+        logger.info(
+            "▶ AI 파이프라인 실행 시작 "
+            f"[manual={manual}, target_date={target_date}, "
+            f"site_no={site_no}, bms_id={bms_id}, ess_id={ess_id}]"
+        )
+
+        try:
+            run_id = await self._db_local_service.create_pipeline_run(
+                ess_id=ess_id,
+                target_date=target_date,
+                site_no=site_no,
+                bms_id=bms_id,
+                message=(
+                    "Manual AI pipeline started."
+                    if manual
+                    else "Scheduled daily AI pipeline started."
+                ),
+            )
+
+            # 1. 관제 DB에서 원본 배터리 데이터 조회
+            battery_data = await self._remote_db_service.find_battery_by_date(
+                target_date=target_date,
+                site_no=site_no,
+                bms_id=bms_id,
+            )
+
+            battery_count = len(battery_data)
+
+            if not battery_data:
+                await self._db_local_service.mark_pipeline_empty(
+                    run_id=run_id,
+                    battery_count=0,
+                    saved_score_count=0,
+                    deleted_preprocessed_count=0,
+                    message=(
+                        "No battery data found. "
+                        f"target_date={target_date}, site_no={site_no}, bms_id={bms_id}"
+                    ),
+                )
+
+                return {
+                    "status": "empty",
+                    "message": "No battery data found for target date/site/bms.",
+                    "run_id": run_id,
+                    "ess_id": ess_id,
+                    "site_no": site_no,
+                    "bms_id": bms_id,
+                    "target_date": target_date.isoformat(),
+                    "battery_count": 0,
+                    "saved_score_count": 0,
+                }
+
+            # 2. raw Parquet 저장
+            raw_file_path = self._file_service.save_raw(
+                ess_id=ess_id,
+                target_date=target_date,
+                data=battery_data,
+            )
+
+            # 3. 전처리
+            preprocessed_data = self._preprocess(
+                data=battery_data,
+                site_no=site_no,
+                bms_id=bms_id,
+                target_date=target_date,
+            )
+
+            # 4. preprocessed Parquet 저장
+            preprocessed_file_path = self._file_service.save_preprocessed(
+                ess_id=ess_id,
+                target_date=target_date,
+                data=preprocessed_data,
+            )
+
+            # 5. AI 처리 실행
+            scores = await self._ai_processing_service.run(preprocessed_data)
+
+            # 6. AI 결과에 실행/식별 정보를 보강
+            scores = self._attach_score_metadata(
+                scores=scores,
+                pipeline_run_id=run_id,
+                site_no=site_no,
+                bms_id=bms_id,
+                target_date=target_date,
+            )
+
+            # 7. result Parquet 저장
+            result_file_path = self._file_service.save_result(
+                ess_id=ess_id,
+                target_date=target_date,
+                data=scores,
+            )
+
+            # 8. anomaly_score DB 저장
+            saved_score_count = await self._db_local_service.save_anomaly_scores(scores)
+
+            # 9. 오래된 preprocessed 파일 삭제
+            deleted_preprocessed_count = self._file_service.cleanup_old_preprocessed()
+
+            # 10. pipeline_run_log 성공 처리
+            await self._db_local_service.mark_pipeline_success(
+                run_id=run_id,
+                battery_count=battery_count,
+                saved_score_count=saved_score_count,
+                deleted_preprocessed_count=deleted_preprocessed_count,
+                raw_file_path=raw_file_path,
+                preprocessed_file_path=preprocessed_file_path,
+                result_file_path=result_file_path,
+                message=(
+                    "AI pipeline completed successfully. "
+                    f"target_date={target_date}, site_no={site_no}, bms_id={bms_id}"
+                ),
+            )
+
+            logger.info(
+                "✅ AI 파이프라인 성공 "
+                f"[run_id={run_id}, ess_id={ess_id}, "
+                f"battery_count={battery_count}, saved_score_count={saved_score_count}]"
+            )
+
+            return {
+                "status": "success",
+                "message": "AI pipeline completed successfully.",
+                "run_id": run_id,
+                "ess_id": ess_id,
+                "site_no": site_no,
+                "bms_id": bms_id,
+                "target_date": target_date.isoformat(),
+                "battery_count": battery_count,
+                "saved_score_count": saved_score_count,
+                "raw_file_path": raw_file_path,
+                "preprocessed_file_path": preprocessed_file_path,
+                "result_file_path": result_file_path,
+                "deleted_preprocessed_count": deleted_preprocessed_count,
+            }
+
+        except Exception as exc:
+            error_message = str(exc)
+
+            logger.exception(
+                "❌ AI 파이프라인 실패 "
+                f"[run_id={run_id}, target_date={target_date}, "
+                f"site_no={site_no}, bms_id={bms_id}]"
+            )
+
+            if run_id is not None:
+                await self._db_local_service.mark_pipeline_error(
+                    run_id=run_id,
+                    error_message=error_message,
+                    battery_count=battery_count,
+                    saved_score_count=saved_score_count,
+                    deleted_preprocessed_count=deleted_preprocessed_count,
+                    raw_file_path=raw_file_path,
+                    preprocessed_file_path=preprocessed_file_path,
+                    result_file_path=result_file_path,
+                )
+
+            return {
+                "status": "error",
+                "message": "AI pipeline failed.",
+                "error_message": error_message,
+                "run_id": run_id,
+                "ess_id": ess_id,
+                "site_no": site_no,
+                "bms_id": bms_id,
+                "target_date": target_date.isoformat(),
+                "battery_count": battery_count,
+                "saved_score_count": saved_score_count,
+            }
+
+    def _preprocess(
+        self,
+        data: List[dict],
+        site_no: int,
+        bms_id: str,
+        target_date: date,
+    ) -> List[dict]:
+        """배터리 원본 데이터 전처리
+
+        현재 단계에서는 raw 데이터를 그대로 반환한다.
+        실제 AI 전처리는 이후 이 함수 또는 별도 preprocess.py에 연결한다.
+        """
+
+        logger.info(
+            "전처리 수행 "
+            f"(현재는 raw copy, count={len(data)}, "
+            f"site_no={site_no}, bms_id={bms_id}, target_date={target_date})"
+        )
+
+        return data
+
+    def _attach_score_metadata(
+        self,
+        scores: List[dict],
+        pipeline_run_id: int,
+        site_no: int,
+        bms_id: str,
+        target_date: date,
+    ) -> List[dict]:
+        """AI 결과에 저장용 메타데이터를 붙인다."""
+
+        prediction_time = datetime.now()
+        enriched_scores: List[dict] = []
+
+        for item in scores:
+            row = dict(item)
+
+            row["pipeline_run_id"] = pipeline_run_id
+            row["site_no"] = row.get("site_no", site_no)
+            row["bms_id"] = row.get("bms_id", bms_id)
+            row["target_date"] = row.get("target_date", target_date)
+            row["date"] = row.get("date", target_date)
+
+            row["serial_number"] = (
+                row.get("serial_number")
+                or row.get("serial_no")
+                or row.get("ess_serial_number")
+                or row.get("bms_id")
+                or bms_id
+            )
+
+            row["prediction_time"] = row.get("prediction_time", prediction_time)
+
+            row["bank_no"] = row.get("bank_no", row.get("bank_number", 0))
+            row["rack_no"] = row.get(
+                "rack_no",
+                row.get("rack_number", row.get("rack_idx", row.get("index", 0))),
+            )
+            row["string_no"] = row.get("string_no", row.get("string_number", 0))
+            row["module_no"] = row.get("module_no", row.get("module_number", 0))
+
+            enriched_scores.append(row)
+
+        return enriched_scores
+
+    def _get_target_date(self) -> date:
+        """설정값 기준으로 분석 대상 날짜 계산"""
+
+        return date.today() + timedelta(days=self._settings.TARGET_DATE_OFFSET_DAYS)
+
+    def _make_ess_id(self, site_no: int, bms_id: str) -> str:
+        """파일 저장 경로 등에 사용할 ESS ID 생성"""
+
+        safe_bms_id = str(bms_id).strip()
+
+        for ch in ['\\', '/', ':', '*', '?', '"', '<', '>', '|', ' ']:
+            safe_bms_id = safe_bms_id.replace(ch, "_")
+
+        return f"SITE_{site_no}_BMS_{safe_bms_id}"

@@ -1,0 +1,59 @@
+absl-py==2.3.1
+astunparse==1.6.3
+Bottleneck @ file:///C:/b/abs_816hr2khp1/croot/bottleneck_1731058648110/work
+certifi==2026.6.17
+cffi==2.0.0
+charset-normalizer==3.4.7
+colorama @ file:///C:/b/abs_a9ozq0l032/croot/colorama_1672387194846/work
+cryptography==49.0.0
+flatbuffers==25.12.19
+gast==0.4.0
+google-auth==2.50.0
+google-auth-oauthlib==0.4.6
+google-pasta==0.2.0
+grpcio==1.80.0
+h5py==3.14.0
+idna==3.18
+importlib_metadata==8.7.1
+joblib @ file:///C:/miniconda3/conda-bld/joblib_1757926369325/work
+keras==2.10.0
+Keras-Preprocessing==1.1.2
+libclang==18.1.1
+Markdown==3.9
+MarkupSafe==3.0.3
+mkl-service==2.4.0
+mkl_fft @ file:///C:/Users/dev-admin/mkl/mkl_fft_1730823082242/work
+mkl_random @ file:///C:/Users/dev-admin/mkl/mkl_random_1730822522280/work
+numexpr @ file:///C:/b/abs_05o8p7bfml/croot/numexpr_1730215959182/work
+numpy @ file:///C:/Users/dev-admin/mkl/numpy_and_numpy_base_1682981337988/work
+oauthlib==3.3.1
+opt_einsum==3.4.0
+packaging==26.2
+pandas @ file:///C:/miniconda3/conda-bld/pandas_1759822263878/work/dist/pandas-2.3.3-cp39-cp39-win_amd64.whl#sha256=8731d094af0d7ded620cab9038fd19f5491597bbb94d358604bb09379f35b1ee
+protobuf==3.19.6
+pyarrow @ file:///C:/miniconda3/conda-bld/pyarrow_1759833602408/work/python
+pyasn1==0.6.3
+pyasn1_modules==0.4.2
+pycparser==2.23
+python-dateutil @ file:///C:/b/abs_3au_koqnbs/croot/python-dateutil_1716495777160/work
+pytz @ file:///C:/b/abs_f8wdzeix0n/croot/pytz_1752135878094/work
+requests==2.32.5
+requests-oauthlib==2.0.0
+scikit-learn @ file:///C:/b/abs_aajc9f7v6r/croot/scikit-learn_1722067652693/work/dist/scikit_learn-1.5.1-cp39-cp39-win_amd64.whl#sha256=c9648dc9e29bcf3f8c05d65be46d6b9252cf25dc12f2d981fd8e8feff3f6e7cd
+scipy @ file:///C:/Users/dev-admin/cr_scipy-feedstock/scipy_1733774324044/work/dist/scipy-1.13.1-cp39-cp39-win_amd64.whl#sha256=f7218697f964ae4372cdcb6f20a05db0d338ccc574c96e9dbf235ed6547dd462
+six @ file:///C:/b/abs_149wuyuo1o/croot/six_1744271521515/work
+tensorboard==2.10.1
+tensorboard-data-server==0.6.1
+tensorboard-plugin-wit==1.8.1
+tensorflow==2.10.0
+tensorflow-estimator==2.10.0
+tensorflow-io-gcs-filesystem==0.31.0
+termcolor==3.1.0
+threadpoolctl @ file:///C:/b/abs_def0dwqlft/croot/threadpoolctl_1719407816649/work
+tqdm @ file:///C:/b/abs_0eh9b6xugj/croot/tqdm_1738945553987/work
+typing_extensions==4.16.0
+tzdata @ file:///home/task_177806041933677/croot/python-tzdata_1778060738968/work
+urllib3==2.6.3
+Werkzeug==3.1.8
+wrapt==2.2.2
+zipp==3.23.1

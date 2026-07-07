@@ -1,0 +1,116 @@
+"""AI 처리 서비스
+
+이 파일은 FastAPI 서버와 실제 AI 처리 함수(ai_process)를 연결하는 서비스다.
+
+역할:
+    1. 전처리된 배터리 데이터를 입력받는다.
+    2. ai/ai_process.py의 ai_process() 함수를 실행한다.
+    3. AI 결과를 반환한다.
+
+중요:
+    ai_process()는 일반 동기 함수다.
+    FastAPI 서버는 비동기 방식으로 동작하므로,
+    AI 처리를 그대로 실행하면 서버 이벤트 루프가 막힐 수 있다.
+
+    그래서 run_in_executor()를 사용해서
+    AI 처리를 별도 스레드에서 실행한다.
+
+현재 상태:
+    - 실제 AI 모델 연결 전
+    - ai_process.py에서 임시 랜덤/룰 기반 점수 생성
+    - 결과 구조는 site_no / bms_id / rack_no / module_no 기준
+"""
+
+import asyncio
+import logging
+from typing import Dict, List
+
+from ai.ai_process import ai_process
+
+
+logger = logging.getLogger("app")
+
+
+class AIProcessingService:
+    """AI 처리 서비스
+
+    SchedulerService에서 이 서비스를 호출한다.
+
+    호출 흐름:
+        SchedulerService
+        ↓
+        AIProcessingService.run()
+        ↓
+        ai.ai_process.ai_process()
+        ↓
+        anomaly_score 저장용 결과 반환
+    """
+
+    def __init__(self):
+        logger.info("✅ AIProcessingService 초기화 완료")
+
+    async def run(self, data: List[dict]) -> List[Dict]:
+        """AI 처리를 비동기로 실행한다.
+
+        Args:
+            data:
+                전처리된 배터리 데이터 목록
+
+        Returns:
+            AI 이상 점수 결과 목록
+
+        반환 예:
+            [
+                {
+                    "site_no": 1,
+                    "bms_id": "BMS001",
+                    "rack_no": 1,
+                    "module_no": 1,
+                    "date": "2026-07-05",
+                    "sc_c1": 0.12,
+                    ...
+                    "sc_c20": 0.33
+                },
+                ...
+            ]
+        """
+
+        if not data:
+            logger.warning("⚠️ AI 처리할 데이터가 없습니다.")
+            return []
+
+        logger.info(f"▶ AI 처리 시작: input_count={len(data)}")
+
+        loop = asyncio.get_running_loop()
+
+        try:
+            results = await loop.run_in_executor(
+                None,
+                ai_process,
+                data,
+            )
+
+        except Exception:
+            logger.exception("❌ AI 처리 중 오류 발생")
+            raise
+
+        if results is None:
+            logger.warning("⚠️ AI 처리 결과가 None입니다.")
+            return []
+
+        logger.info(f"✅ AI 처리 완료: output_count={len(results)}")
+
+        return results
+
+    async def process(self, data: List[dict]) -> List[Dict]:
+        """기존 코드 호환용 메서드
+
+        예전 코드에서 아래처럼 호출하고 있을 수 있다.
+
+            ai_processing_service.process(data)
+
+        새 코드에서는 run()을 기준으로 사용하지만,
+        기존 호출부가 남아 있어도 깨지지 않도록 process()도 유지한다.
+        """
+
+        return await self.run(data)
