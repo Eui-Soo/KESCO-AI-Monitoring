@@ -16,6 +16,7 @@ import core.model.models  # noqa: F401
 from core.container import container
 from router.anomaly_router import router as anomaly_router
 from router.health_router import router as health_router
+from router.monitor_router import router as monitor_router
 from router.pipeline_router import router as pipeline_router
 from router.site_router import router as site_router
 
@@ -149,6 +150,7 @@ async def monitor_ui():
 app.include_router(health_router)
 app.include_router(site_router)
 app.include_router(pipeline_router)
+app.include_router(monitor_router)
 app.include_router(anomaly_router)
 
 
