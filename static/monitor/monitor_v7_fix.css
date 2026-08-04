@@ -1,0 +1,269 @@
+/* ============================================================
+   KESCO AI Monitoring - v7 layout stabilization patch
+   목적: API 연동 후 화면 깨짐/스크롤 막힘/테이블 넘침 방지
+   이 파일은 기존 monitor.css 뒤에 로드되어 override 역할을 한다.
+============================================================ */
+
+html,
+body {
+  min-height: 100%;
+  height: auto !important;
+  overflow: auto !important;
+}
+
+body {
+  overflow-x: hidden !important;
+  overflow-y: auto !important;
+}
+
+.app-shell {
+  min-height: 100vh !important;
+  height: auto !important;
+  display: grid !important;
+  grid-template-columns: 300px minmax(0, 1fr) !important;
+  align-items: stretch !important;
+}
+
+.sidebar {
+  position: sticky !important;
+  top: 0 !important;
+  height: 100vh !important;
+  min-height: 100vh !important;
+  overflow: hidden !important;
+  z-index: 10 !important;
+}
+
+.main-panel {
+  min-width: 0 !important;
+  min-height: 100vh !important;
+  height: auto !important;
+  display: flex !important;
+  flex-direction: column !important;
+  overflow: visible !important;
+}
+
+.topbar {
+  position: sticky !important;
+  top: 0 !important;
+  z-index: 9 !important;
+  min-height: 84px !important;
+  flex: 0 0 auto !important;
+}
+
+.topbar-right {
+  min-width: 0 !important;
+  flex-wrap: wrap !important;
+  row-gap: 8px !important;
+  justify-content: flex-end !important;
+}
+
+.status-pill,
+.user-chip {
+  white-space: nowrap !important;
+}
+
+.content {
+  flex: 1 0 auto !important;
+  min-height: calc(100vh - 132px) !important;
+  height: auto !important;
+  overflow: visible !important;
+  padding-bottom: 32px !important;
+}
+
+.page {
+  width: 100% !important;
+  max-width: 1640px !important;
+  margin: 0 auto !important;
+  padding: 28px 30px 36px !important;
+  min-width: 0 !important;
+}
+
+.footerbar {
+  flex: 0 0 auto !important;
+  min-height: 48px !important;
+  flex-wrap: wrap !important;
+  row-gap: 6px !important;
+}
+
+/* 공통 패널 안정화 */
+.panel,
+.hero-card,
+.summary-card,
+.table-card,
+.info-card,
+.detail-card,
+.metric-card,
+.chart-card,
+.recommend-card,
+.tree-card,
+.module-card {
+  min-width: 0 !important;
+  overflow: hidden !important;
+}
+
+/* 그리드가 좁은 화면에서 깨지지 않게 */
+.dashboard-grid,
+.dash-main,
+.sites-layout,
+.detail-shell,
+.detail-grid,
+.module-grid,
+.summary-grid,
+.stat-grid,
+.metric-grid {
+  min-width: 0 !important;
+}
+
+.dashboard-grid {
+  grid-template-columns: repeat(3, minmax(260px, 1fr)) !important;
+}
+
+.dash-main {
+  grid-template-columns: minmax(0, 1fr) 420px !important;
+}
+
+.sites-layout {
+  grid-template-columns: minmax(0, 1fr) 340px !important;
+  align-items: start !important;
+}
+
+.detail-page,
+.detail-left,
+.detail-right {
+  min-width: 0 !important;
+}
+
+.detail-title-row,
+.page-heading,
+.filter-card,
+.tabs,
+.breadcrumb {
+  min-width: 0 !important;
+  flex-wrap: wrap !important;
+}
+
+.breadcrumb {
+  overflow-wrap: anywhere !important;
+  word-break: keep-all !important;
+  line-height: 1.55 !important;
+}
+
+/* 테이블 넘침 처리 */
+.table-card,
+.ranking-table,
+.table-wrap,
+.data-table-wrap {
+  overflow-x: auto !important;
+  overflow-y: hidden !important;
+}
+
+table,
+.data-table {
+  min-width: 980px !important;
+  width: 100% !important;
+  border-collapse: collapse !important;
+}
+
+.data-table th,
+.data-table td,
+table th,
+table td {
+  white-space: nowrap !important;
+}
+
+/* 버튼/배지 깨짐 방지 */
+button,
+.table-action,
+.state-badge,
+.score-badge,
+.tab,
+.page-btn {
+  white-space: nowrap !important;
+  flex-shrink: 0 !important;
+}
+
+/* 사이트 상세 내부 카드 영역 */
+.detail-layout,
+.detail-main,
+.detail-content,
+.detail-body {
+  min-width: 0 !important;
+  overflow: visible !important;
+}
+
+.cell-map,
+.cell-grid,
+.heatmap,
+.cell-heatmap {
+  min-width: 0 !important;
+  overflow: visible !important;
+}
+
+.cell-grid,
+.heatmap,
+.cell-heatmap {
+  display: grid !important;
+  grid-template-columns: repeat(auto-fit, minmax(56px, 1fr)) !important;
+  gap: 10px !important;
+}
+
+.cell,
+.cell-box,
+.heat-cell {
+  min-width: 0 !important;
+  aspect-ratio: 1 / .82 !important;
+}
+
+/* SVG/chart 영역 */
+svg,
+.chart-svg {
+  max-width: 100% !important;
+  height: auto !important;
+}
+
+/* 반응형 보정 */
+@media (max-width: 1500px) {
+  .app-shell {
+    grid-template-columns: 270px minmax(0, 1fr) !important;
+  }
+  .dash-main,
+  .sites-layout {
+    grid-template-columns: 1fr !important;
+  }
+  .side-stack,
+  .sites-layout > aside {
+    display: grid !important;
+    grid-template-columns: repeat(3, minmax(220px, 1fr)) !important;
+    gap: 18px !important;
+  }
+}
+
+@media (max-width: 1180px) {
+  .app-shell {
+    display: block !important;
+  }
+  .sidebar {
+    position: relative !important;
+    height: auto !important;
+    min-height: auto !important;
+  }
+  .ess-illustration,
+  .sidebar-footer {
+    display: none !important;
+  }
+  .nav-list {
+    flex-direction: row !important;
+    overflow-x: auto !important;
+    padding: 14px 18px !important;
+  }
+  .nav-item {
+    min-width: 150px !important;
+  }
+  .dashboard-grid {
+    grid-template-columns: 1fr !important;
+  }
+  .side-stack,
+  .sites-layout > aside {
+    grid-template-columns: 1fr !important;
+  }
+}
