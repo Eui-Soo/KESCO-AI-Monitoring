@@ -170,165 +170,138 @@ class MonitorService:
     def __init__(self, repository: Optional[MonitorRepository] = None):
         self.repository = repository or MonitorRepository()
 
+    async def _db_sites(self) -> list[dict[str, Any]]:
+        """DB anomaly_score 기반 사이트 목록을 UI 응답 구조로 변환한다. 실패 시 빈 리스트를 반환한다."""
+        try:
+            rows = await self.repository.get_latest_site_scores(limit=200)
+            sites = [_site_from_db_row(row) for row in rows]
+            return [site for site in sites if site]
+        except Exception:
+            return []
+
     async def get_system_status(self) -> dict[str, Any]:
         db_ping = await self.repository.ping()
+        try:
+            pipeline = await self.repository.get_pipeline_status_summary() if db_ping["ok"] else {}
+        except Exception:
+            pipeline = {}
         return {
             "status": "success",
             "result": {
-                "system_time": NOW_TEXT,
+                "system_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "api_status": "normal",
                 "db_status": "normal" if db_ping["ok"] else "abnormal",
                 "db_message": db_ping["message"],
-                "last_analysis_time": LAST_ANALYSIS_TEXT,
+                "last_analysis_time": pipeline.get("last_run_time") or LAST_ANALYSIS_TEXT,
                 "server_name": "kesco-ai-monitor-01",
                 "server_ip": "10.10.10.25",
                 "system_version": "1.0.0",
                 "model_version": "cnn_lstm_ensemble_v1.0.0",
                 "environment": "production",
-                "data_source": "mock-ui + local-db-status",
+                "data_source": "local-db-status",
             },
         }
 
     async def get_dashboard_summary(self) -> dict[str, Any]:
-        counts = _status_counts()
-        return {
-            "status": "success",
-            "result": {
-                "summary": {
-                    "total_site_count": 128,
-                    "ai_available_site_count": 96,
-                    **counts,
-                    "recent_failed_analysis_count": 2,
-                    "data_source": "mock",
+        db_sites = await self._db_sites()
+        if db_sites:
+            try:
+                pipeline = await self.repository.get_pipeline_status_summary()
+            except Exception:
+                pipeline = {}
+            counts = _status_counts_from_sites(db_sites)
+            ranked = _risk_ranking_from_sites(db_sites, limit=6)
+            priority_sites = [
+                {
+                    "priority_rank": index + 1,
+                    "site_id": site["site_id"],
+                    "site_name": site["site_name"],
+                    "reason": "이상 점수 높음" if site.get("latest_score", 0) >= 71 else "이상 점수 상승/주의 구간",
+                    "score": site.get("latest_score"),
+                    "risk_level": site.get("status"),
+                    "recommend_action": site.get("recommend_action") or "상세 화면에서 Bank/Rack/Module 단위 점검 필요",
+                }
+                for index, site in enumerate(ranked[:3])
+            ]
+            return {
+                "status": "success",
+                "result": {
+                    "summary": {
+                        "total_site_count": len(db_sites),
+                        "ai_available_site_count": sum(1 for site in db_sites if site.get("is_ai_available")),
+                        **counts,
+                        "recent_failed_analysis_count": int(pipeline.get("failed_count") or 0),
+                        "data_source": "local-db",
+                    },
+                    "risk_ranking": ranked,
+                    "priority_sites": priority_sites,
+                    "alerts": [
+                        {"alert_type": "db_connected", "alert_level": "normal", "title": "로컬 DB 연동 활성화", "message": "anomaly_score 기반 대시보드 요약을 표시 중입니다.", "site_count": len(db_sites), "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+                        {"alert_type": "analysis_failed", "alert_level": "warning" if int(pipeline.get("failed_count") or 0) else "normal", "title": "파이프라인 실행 이력", "message": f"전체 {pipeline.get('total_count', 0)}건 / 실패 {pipeline.get('failed_count', 0)}건", "site_count": int(pipeline.get("failed_count") or 0), "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+                    ],
                 },
-                "risk_ranking": _risk_ranking(limit=6),
-                "priority_sites": [
-                    {
-                        "priority_rank": 1,
-                        "site_id": "SITE-0021",
-                        "site_name": "영광 ESS 2호기",
-                        "reason": "이상 점수 매우 높음",
-                        "score": 93.7,
-                        "risk_level": "abnormal",
-                        "recommend_action": "Cell 07 과열/전압 편차 즉시 점검",
-                    },
-                    {
-                        "priority_rank": 2,
-                        "site_id": "SITE-0022",
-                        "site_name": "평택 ESS 1호기",
-                        "reason": "이상 점수 높음",
-                        "score": 87.2,
-                        "risk_level": "abnormal",
-                        "recommend_action": "Rack 01 Module 02 정밀 점검",
-                    },
-                    {
-                        "priority_rank": 3,
-                        "site_id": "SITE-0023",
-                        "site_name": "군산 ESS 3호기",
-                        "reason": "이상 점수 상승 추세",
-                        "score": 72.4,
-                        "risk_level": "warning",
-                        "recommend_action": "최근 7일 추이 지속 관찰",
-                    },
-                ],
-                "alerts": [
-                    {"alert_type": "data_missing", "alert_level": "warning", "title": "데이터 수집 누락 사이트", "message": "최근 수집 누락 사이트가 존재합니다.", "site_count": 3, "created_at": NOW_TEXT},
-                    {"alert_type": "analysis_failed", "alert_level": "abnormal", "title": "최근 분석 실패", "message": "최근 24시간 기준 분석 실패 2건이 발생했습니다.", "site_count": 2, "created_at": NOW_TEXT},
-                ],
-            },
-        }
+            }
 
-    async def get_sites(
-        self,
-        keyword: Optional[str] = None,
-        manufacturer: Optional[str] = None,
-        region: Optional[str] = None,
-        install_area: Optional[str] = None,
-        status: Optional[str] = None,
-        sort: Literal["name", "installed_at", "score"] = "score",
-        order: Literal["asc", "desc"] = "desc",
-        page: int = 1,
-        page_size: int = 24,
-    ) -> dict[str, Any]:
-        items = list(SITES)
+        counts = _status_counts()
+        return {"status": "success", "result": {"summary": {"total_site_count": 128, "ai_available_site_count": 96, **counts, "recent_failed_analysis_count": 2, "data_source": "mock-fallback"}, "risk_ranking": _risk_ranking(limit=6), "priority_sites": [{"priority_rank": 1, "site_id": "SITE-0021", "site_name": "영광 ESS 2호기", "reason": "이상 점수 매우 높음", "score": 93.7, "risk_level": "abnormal", "recommend_action": "Cell 07 과열/전압 편차 즉시 점검"}, {"priority_rank": 2, "site_id": "SITE-0022", "site_name": "평택 ESS 1호기", "reason": "이상 점수 높음", "score": 87.2, "risk_level": "abnormal", "recommend_action": "Rack 01 Module 02 정밀 점검"}, {"priority_rank": 3, "site_id": "SITE-0023", "site_name": "군산 ESS 3호기", "reason": "이상 점수 상승 추세", "score": 72.4, "risk_level": "warning", "recommend_action": "최근 7일 추이 지속 관찰"}], "alerts": [{"alert_type": "data_missing", "alert_level": "warning", "title": "데이터 수집 누락 사이트", "message": "최근 수집 누락 사이트가 존재합니다.", "site_count": 3, "created_at": NOW_TEXT}, {"alert_type": "analysis_failed", "alert_level": "abnormal", "title": "최근 분석 실패", "message": "최근 24시간 기준 분석 실패 2건이 발생했습니다.", "site_count": 2, "created_at": NOW_TEXT}]}}
+
+    async def get_sites(self, keyword: Optional[str] = None, manufacturer: Optional[str] = None, region: Optional[str] = None, install_area: Optional[str] = None, status: Optional[str] = None, sort: Literal["name", "installed_at", "score"] = "score", order: Literal["asc", "desc"] = "desc", page: int = 1, page_size: int = 24) -> dict[str, Any]:
+        db_sites = await self._db_sites()
+        items = db_sites if db_sites else list(SITES)
+        data_source = "local-db" if db_sites else "mock-fallback"
         if keyword:
             keyword_lower = keyword.lower()
-            items = [site for site in items if keyword_lower in f"{site['site_name']} {site['region']} {site['manufacturer']}".lower()]
+            items = [site for site in items if keyword_lower in f"{site.get('site_name')} {site.get('region')} {site.get('manufacturer')} {site.get('bms_id')}".lower()]
         if manufacturer:
-            items = [site for site in items if site["manufacturer"] == manufacturer]
+            items = [site for site in items if site.get("manufacturer") == manufacturer]
         if region:
-            items = [site for site in items if region in site["region"]]
+            items = [site for site in items if region in str(site.get("region"))]
         if install_area:
-            items = [site for site in items if site["install_area"] == install_area]
+            items = [site for site in items if site.get("install_area") == install_area]
         if status:
-            items = [site for site in items if site["status"] == status]
-
+            items = [site for site in items if site.get("status") == status]
         reverse = order == "desc"
         if sort == "name":
-            items.sort(key=lambda site: site["site_name"], reverse=reverse)
+            items.sort(key=lambda site: str(site.get("site_name") or ""), reverse=reverse)
         elif sort == "installed_at":
-            items.sort(key=lambda site: site["installed_at"], reverse=reverse)
+            items.sort(key=lambda site: str(site.get("installed_at") or ""), reverse=reverse)
         else:
-            items.sort(key=lambda site: site["latest_score"] if site["latest_score"] is not None else -1, reverse=reverse)
-
+            items.sort(key=lambda site: site.get("latest_score") if site.get("latest_score") is not None else -1, reverse=reverse)
         total = len(items)
         start = (page - 1) * page_size
         end = start + page_size
-        return {
-            "status": "success",
-            "page": page,
-            "page_size": page_size,
-            "total_count": total,
-            "items": items[start:end],
-            "filters": {
-                "manufacturers": sorted({site["manufacturer"] for site in SITES}),
-                "regions": sorted({site["region"] for site in SITES}),
-                "install_areas": sorted({site["install_area"] for site in SITES}),
-                "statuses": ["normal", "warning", "abnormal", "unavailable", "data_missing"],
-            },
-            "data_source": "mock",
-        }
+        return {"status": "success", "page": page, "page_size": page_size, "total_count": total, "items": items[start:end], "filters": {"manufacturers": sorted({site.get("manufacturer", "-") for site in items}), "regions": sorted({site.get("region", "-") for site in items}), "install_areas": sorted({site.get("install_area", "-") for site in items}), "statuses": ["normal", "warning", "abnormal", "unavailable", "data_missing"]}, "data_source": data_source}
 
     async def get_site_detail(self, site_id: str) -> dict[str, Any]:
-        site = _find_site(site_id)
-        return {
-            "status": "success",
-            "result": {
-                **site,
-                "model_name": "CNN-LSTM Ensemble",
-                "model_version": "cnn_lstm_ensemble_v1.0.0",
-                "selected_level": "module",
-                "selected_bank_id": "BANK-01",
-                "selected_rack_id": "RACK-03",
-                "selected_string_id": "STRING-02",
-                "selected_module_id": "MODULE-05",
-                "breadcrumb": [site["site_name"], "Bank 01", "Rack 03", "String 02", "Module 05"],
-                "data_source": "mock",
-            },
-        }
+        db_sites = await self._db_sites()
+        site = _find_site_optional(site_id, db_sites) if db_sites else None
+        if not site:
+            site = _find_site(site_id)
+            data_source = "mock-fallback"
+        else:
+            data_source = "local-db"
+        rack_no = int(site.get("selected_rack_no") or 1)
+        string_no = int(site.get("selected_string_no") or 1)
+        module_no = int(site.get("selected_module_no") or 1)
+        return {"status": "success", "result": {**site, "model_name": "CNN-LSTM Ensemble", "model_version": "cnn_lstm_ensemble_v1.0.0", "selected_level": "module", "selected_bank_id": "BANK-01", "selected_rack_id": f"RACK-{rack_no:02d}", "selected_string_id": f"STRING-{string_no:02d}", "selected_module_id": f"MODULE-{module_no:02d}", "breadcrumb": [site["site_name"], "Bank 01", f"Rack {rack_no:02d}", f"String {string_no:02d}", f"Module {module_no:02d}"], "data_source": data_source}}
 
     async def get_site_tree(self, site_id: str) -> dict[str, Any]:
-        site = _find_site(site_id)
+        db_sites = await self._db_sites()
+        site = _find_site_optional(site_id, db_sites) if db_sites else None
+        if not site:
+            site = _find_site(site_id)
         return {"status": "success", "result": _tree(site)}
 
     async def get_level_detail(self, site_id: str, level: str = "module", bank_id: str = "BANK-01", rack_id: Optional[str] = "RACK-03", string_id: Optional[str] = "STRING-02", module_id: Optional[str] = "MODULE-05", target_date: Optional[str] = None) -> dict[str, Any]:
-        site = _find_site(site_id)
-        base = {
-            "site_id": site["site_id"],
-            "site_name": site["site_name"],
-            "target_date": target_date,
-            "level": level,
-            "bank_id": bank_id,
-            "rack_id": rack_id,
-            "string_id": string_id,
-            "module_id": module_id,
-            "status": site["status"],
-            "status_text": site["status_text"],
-            "max_score": site["latest_score"] or 0,
-            "avg_score": 54.2 if site["latest_score"] else 0,
-            "last_analysis_time": site["last_analysis_time"],
-            "data_source": "mock",
-        }
+        db_sites = await self._db_sites()
+        site = _find_site_optional(site_id, db_sites) if db_sites else None
+        if site and level == "module":
+            row = await self.repository.get_latest_module_score_row(int(site["site_no"]), site.get("bms_id"))
+            if row:
+                return {"status": "success", "result": _module_level_from_db_row(site, row, target_date=target_date)}
+        if not site:
+            site = _find_site(site_id)
+        base = {"site_id": site["site_id"], "site_name": site["site_name"], "target_date": target_date, "level": level, "bank_id": bank_id, "rack_id": rack_id, "string_id": string_id, "module_id": module_id, "status": site["status"], "status_text": site["status_text"], "max_score": site["latest_score"] or 0, "avg_score": 54.2 if site["latest_score"] else 0, "last_analysis_time": site["last_analysis_time"], "data_source": "local-db-summary" if db_sites else "mock-fallback"}
         if level == "module":
             result = {**base, "module_name": "Module 05", "module_no": 5, "module_voltage": 74.1, "module_current": 38.2, "module_temperature": 33.6, "soc": 78.0, "soh": 96.2, "danger_cell_count": 1, "warning_cell_count": 3, "normal_cell_count": 16, "cells": _cells()}
         elif level == "string":
@@ -340,12 +313,15 @@ class MonitorService:
         return {"status": "success", "result": result}
 
     async def get_trend(self, site_id: str, level: str = "module", bank_id: Optional[str] = None, rack_id: Optional[str] = None, string_id: Optional[str] = None, module_id: Optional[str] = None, cell_no: Optional[int] = None, days: int = 7) -> dict[str, Any]:
-        _find_site(site_id)
-        return {"status": "success", "result": {"target_level": level, "target_id": cell_no or module_id or string_id or rack_id or bank_id or site_id, "days": days, "trend": _trend(days=days), "data_source": "mock"}}
+        db_sites = await self._db_sites()
+        site = _find_site_optional(site_id, db_sites) if db_sites else None
+        if not site:
+            _find_site(site_id)
+        return {"status": "success", "result": {"target_level": level, "target_id": cell_no or module_id or string_id or rack_id or bank_id or site_id, "days": days, "trend": _trend(days=days), "data_source": "mock-trend"}}
 
     async def get_recommendations(self, target_level: str = "module", site_id: Optional[str] = "SITE-0021", bank_id: Optional[str] = None, rack_id: Optional[str] = None, string_id: Optional[str] = None, module_id: Optional[str] = None, cell_no: Optional[int] = None) -> dict[str, Any]:
         target_id = cell_no or module_id or string_id or rack_id or bank_id or site_id
-        return {"status": "success", "result": [{"recommendation_id": "REC-0001", "target_level": target_level, "target_id": target_id, "severity": "abnormal", "title": "위험 Cell에 대한 정밀 점검 필요", "message": "Cell 07에서 과열 및 전압 편차가 동시에 확인되었습니다.", "reason": "이상 점수 92/100, 전압 편차 +128mV, 온도 48.7℃", "action": "냉각 상태 점검 및 셀 단위 전압/저항 측정을 수행하세요.", "created_at": NOW_TEXT}, {"recommendation_id": "REC-0002", "target_level": target_level, "target_id": target_id, "severity": "warning", "title": "최근 이상 점수 상승 추세 관찰", "message": "최근 7일 기준 이상 점수가 상승하고 있습니다.", "reason": "7일 전 32점 → 현재 63점", "action": "다음 분석 주기까지 추이를 모니터링하고 점수 상승 지속 시 현장 점검을 예약하세요.", "created_at": NOW_TEXT}], "data_source": "mock"}
+        return {"status": "success", "result": [{"recommendation_id": "REC-0001", "target_level": target_level, "target_id": target_id, "severity": "abnormal", "title": "위험 점수 대상 정밀 점검 필요", "message": "anomaly_score 기준 높은 점수가 확인되었습니다.", "reason": "최신 AI 분석 결과 기반 위험도 산정", "action": "상세 화면에서 Bank/Rack/String/Module/Cell 위치를 확인하고 현장 점검 여부를 판단하세요.", "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}, {"recommendation_id": "REC-0002", "target_level": target_level, "target_id": target_id, "severity": "warning", "title": "분석 결과 추이 관찰", "message": "실제 추이 API 연동 전까지는 최근 분석 결과 중심으로 표시합니다.", "reason": "v11 단계: 대시보드/목록/모듈 상세 DB 전환", "action": "다음 단계에서 target_date별 trend 조회를 연결하세요.", "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}], "data_source": "local-db-aware"}
 
     async def get_db_summary(self) -> dict[str, Any]:
         return {"status": "success", "result": await self.repository.get_db_summary()}
@@ -364,6 +340,80 @@ def _find_site(site_id: str) -> dict[str, Any]:
             return site
     raise HTTPException(status_code=404, detail=f"Monitor site not found. site_id={site_id}")
 
+
+def _find_site_optional(site_id: str, sites: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    for site in sites:
+        if site.get("site_id") == site_id or str(site.get("site_no")) == str(site_id):
+            return site
+    return None
+
+
+def _normalize_score(score: Any) -> Optional[float]:
+    if score is None:
+        return None
+    try:
+        value = float(score)
+    except (TypeError, ValueError):
+        return None
+    if value <= 1.0:
+        value *= 100.0
+    return round(value, 1)
+
+
+def _status_from_score(score: Optional[float]) -> tuple[str, str]:
+    if score is None:
+        return "unavailable", "진단 불가"
+    if score >= 71:
+        return "abnormal", "비정상"
+    if score >= 40:
+        return "warning", "주의"
+    return "normal", "정상"
+
+
+def _site_from_db_row(row: dict[str, Any]) -> dict[str, Any]:
+    site_no = int(row.get("site_no") or 0)
+    bms_id = row.get("bms_id") or "-"
+    score = _normalize_score(row.get("latest_score"))
+    avg_score = _normalize_score(row.get("average_score"))
+    status, status_text = _status_from_score(score)
+    rack_count = int(row.get("rack_count") or 0)
+    string_count = int(row.get("string_count") or 0)
+    module_count = int(row.get("module_count") or 0)
+    bank_count = int(row.get("bank_count") or 0)
+    return {"site_id": f"SITE-{site_no:04d}", "site_no": site_no, "site_name": f"ESS 사이트 {site_no}", "region": "로컬 DB", "install_area": "-", "manufacturer": "-", "installed_at": str(row.get("target_date") or "-"), "bms_id": bms_id, "ess_capacity": "-", "bank_count": bank_count, "rack_count": rack_count, "string_count": string_count, "module_count": module_count, "cell_count": module_count * 20 if module_count else 20, "is_ai_available": score is not None, "latest_score": score, "average_score": avg_score, "status": status, "status_text": status_text, "last_data_time": row.get("last_data_time"), "last_analysis_time": row.get("last_analysis_time"), "data_status": "normal", "risk_location": "anomaly_score 최신 분석 결과 기준", "selected_rack_no": 1, "selected_string_no": 1, "selected_module_no": 1, "score_row_count": int(row.get("score_row_count") or 0), "data_source": "local-db"}
+
+
+def _status_counts_from_sites(sites: list[dict[str, Any]]) -> dict[str, int]:
+    return {"normal_site_count": sum(1 for site in sites if site.get("status") == "normal"), "warning_site_count": sum(1 for site in sites if site.get("status") == "warning"), "abnormal_site_count": sum(1 for site in sites if site.get("status") == "abnormal"), "unavailable_site_count": sum(1 for site in sites if site.get("status") == "unavailable"), "data_missing_site_count": sum(1 for site in sites if site.get("status") == "data_missing")}
+
+
+def _risk_ranking_from_sites(sites: list[dict[str, Any]], limit: int = 10) -> list[dict[str, Any]]:
+    ranked = [site for site in sites if site.get("latest_score") is not None]
+    ranked.sort(key=lambda item: item.get("latest_score") or -1, reverse=True)
+    return [{"rank": index + 1, "site_id": site["site_id"], "site_no": site["site_no"], "site_name": site["site_name"], "region": site["region"], "install_area": site["install_area"], "manufacturer": site["manufacturer"], "latest_score": site["latest_score"], "status": site["status"], "status_text": site["status_text"], "last_analysis_time": site.get("last_analysis_time"), "risk_location": site.get("risk_location", "-")} for index, site in enumerate(ranked[:limit])]
+
+
+def _module_level_from_db_row(site: dict[str, Any], row: dict[str, Any], target_date: Optional[str] = None) -> dict[str, Any]:
+    bank_no = int(row.get("bank_no") or 1)
+    rack_no = int(row.get("rack_no") or 1)
+    string_no = int(row.get("string_no") or 1)
+    module_no = int(row.get("module_no") or 1)
+    max_score = _normalize_score(row.get("max_score")) or 0
+    avg_score = _normalize_score(row.get("average_score")) or max_score
+    status, status_text = _status_from_score(max_score)
+    cells = []
+    danger_count = warning_count = normal_count = 0
+    for index in range(1, 21):
+        score = _normalize_score(row.get(f"cell_{index}_score"))
+        cell_status, cell_status_text = _status_from_score(score)
+        if cell_status == "abnormal":
+            danger_count += 1
+        elif cell_status == "warning":
+            warning_count += 1
+        elif cell_status == "normal":
+            normal_count += 1
+        cells.append({"cell_no": index, "cell_name": f"Cell {index:02d}", "score": score if score is not None else 0, "status": cell_status, "status_text": cell_status_text, "voltage": None, "temperature": None, "internal_resistance": None, "capacity": None, "soc": None, "trend_score": score if score is not None else 0, "raw_level": row.get(f"cell_{index}_level")})
+    return {"site_id": site["site_id"], "site_name": site["site_name"], "target_date": target_date or row.get("target_date"), "level": "module", "bank_id": f"BANK-{bank_no:02d}", "rack_id": f"RACK-{rack_no:02d}", "string_id": f"STRING-{string_no:02d}", "module_id": f"MODULE-{module_no:02d}", "module_name": f"Module {module_no:02d}", "module_no": module_no, "status": status, "status_text": status_text, "max_score": max_score, "avg_score": avg_score, "last_analysis_time": row.get("prediction_time"), "module_voltage": None, "module_current": None, "module_temperature": None, "soc": None, "soh": None, "danger_cell_count": danger_count, "warning_cell_count": warning_count, "normal_cell_count": normal_count, "cells": cells, "raw_max_level": row.get("max_level"), "serial_number": row.get("serial_number"), "sensing_datetime": row.get("sensing_datetime"), "prediction_time": row.get("prediction_time"), "data_source": "local-db"}
 
 def _status_counts() -> dict[str, int]:
     return {"normal_site_count": sum(1 for site in SITES if site["status"] == "normal"), "warning_site_count": sum(1 for site in SITES if site["status"] == "warning"), "abnormal_site_count": sum(1 for site in SITES if site["status"] == "abnormal"), "unavailable_site_count": sum(1 for site in SITES if site["status"] == "unavailable"), "data_missing_site_count": sum(1 for site in SITES if site["status"] == "data_missing")}

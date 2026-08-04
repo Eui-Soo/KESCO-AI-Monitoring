@@ -266,6 +266,199 @@ class MonitorRepository:
             await conn.close()
 
 
+    async def get_latest_site_scores(self, limit: int = 100) -> list[dict[str, Any]]:
+        """anomaly_score 기반 사이트별 최신 위험 요약을 반환한다."""
+
+        limit = max(1, min(int(limit), 500))
+        conn = await self._connect()
+        try:
+            exists = await conn.fetchval(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM information_schema.tables
+                    WHERE table_schema = 'public'
+                      AND table_name = 'anomaly_score'
+                )
+                """
+            )
+            if not exists:
+                return []
+
+            columns = await self._columns_with_conn(conn, "anomaly_score")
+            required = {"site_no", "bms_id", "max_score"}
+            if not required.issubset(set(columns)):
+                return []
+
+            has_target_date = "target_date" in columns
+            has_prediction_time = "prediction_time" in columns
+            has_sensing_datetime = "sensing_datetime" in columns
+            has_average_score = "average_score" in columns
+            has_max_level = "max_level" in columns
+
+            count_exprs = []
+            for col, alias in [
+                ("bank_no", "bank_count"),
+                ("rack_no", "rack_count"),
+                ("string_no", "string_count"),
+                ("module_no", "module_count"),
+            ]:
+                if col in columns:
+                    count_exprs.append(f'COUNT(DISTINCT "{col}") AS {alias}')
+                else:
+                    count_exprs.append(f'0 AS {alias}')
+
+            target_expr = 'MAX("target_date") AS target_date' if has_target_date else 'NULL AS target_date'
+            prediction_expr = 'MAX("prediction_time") AS last_analysis_time' if has_prediction_time else 'NULL AS last_analysis_time'
+            sensing_expr = 'MAX("sensing_datetime") AS last_data_time' if has_sensing_datetime else 'NULL AS last_data_time'
+            avg_expr = 'AVG("average_score") AS average_score' if has_average_score else 'AVG("max_score") AS average_score'
+            level_expr = 'MAX("max_level") AS max_level' if has_max_level else 'NULL AS max_level'
+
+            if has_target_date:
+                source_sql = """
+                    WITH latest AS (
+                        SELECT "site_no", "bms_id", MAX("target_date") AS target_date
+                        FROM "anomaly_score"
+                        GROUP BY "site_no", "bms_id"
+                    )
+                    SELECT a.*
+                    FROM "anomaly_score" a
+                    JOIN latest l
+                      ON l."site_no" = a."site_no"
+                     AND l."bms_id" = a."bms_id"
+                     AND l.target_date = a."target_date"
+                """
+            else:
+                source_sql = 'SELECT * FROM "anomaly_score"'
+
+            sql = f"""
+                WITH src AS ({source_sql})
+                SELECT
+                    "site_no",
+                    "bms_id",
+                    {target_expr},
+                    {prediction_expr},
+                    {sensing_expr},
+                    MAX("max_score") AS latest_score,
+                    {avg_expr},
+                    {level_expr},
+                    COUNT(*) AS score_row_count,
+                    {", ".join(count_exprs)}
+                FROM src
+                GROUP BY "site_no", "bms_id"
+                ORDER BY MAX("max_score") DESC NULLS LAST
+                LIMIT $1
+            """
+            rows = await conn.fetch(sql, limit)
+            return [{key: _json_safe(value) for key, value in dict(row).items()} for row in rows]
+        finally:
+            await conn.close()
+
+    async def get_pipeline_status_summary(self) -> dict[str, Any]:
+        """pipeline_run_log의 성공/실패/최근 실행 현황을 반환한다."""
+
+        conn = await self._connect()
+        try:
+            exists = await conn.fetchval(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM information_schema.tables
+                    WHERE table_schema = 'public'
+                      AND table_name = 'pipeline_run_log'
+                )
+                """
+            )
+            if not exists:
+                return {"exists": False, "total_count": 0, "success_count": 0, "failed_count": 0}
+
+            columns = await self._columns_with_conn(conn, "pipeline_run_log")
+            if "status" not in columns:
+                return {"exists": True, "total_count": 0, "success_count": 0, "failed_count": 0}
+
+            time_col = next((col for col in ["finished_at", "started_at", "inserted", "target_date"] if col in columns), None)
+            time_expr = f'MAX("{time_col}") AS last_run_time' if time_col else 'NULL AS last_run_time'
+            row = await conn.fetchrow(
+                f"""
+                SELECT
+                    COUNT(*) AS total_count,
+                    COUNT(*) FILTER (WHERE "status" = 'success') AS success_count,
+                    COUNT(*) FILTER (WHERE "status" <> 'success') AS failed_count,
+                    {time_expr}
+                FROM "pipeline_run_log"
+                """
+            )
+            result = {key: _json_safe(value) for key, value in dict(row).items()} if row else {}
+            result["exists"] = True
+            return result
+        finally:
+            await conn.close()
+
+    async def get_latest_module_score_row(self, site_no: int, bms_id: Optional[str] = None) -> Optional[dict[str, Any]]:
+        """특정 site_no/bms_id의 최신 또는 최악 module row를 반환한다."""
+
+        conn = await self._connect()
+        try:
+            exists = await conn.fetchval(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM information_schema.tables
+                    WHERE table_schema = 'public'
+                      AND table_name = 'anomaly_score'
+                )
+                """
+            )
+            if not exists:
+                return None
+
+            columns = await self._columns_with_conn(conn, "anomaly_score")
+            if "site_no" not in columns or "max_score" not in columns:
+                return None
+
+            selected = [
+                col for col in [
+                    "id", "pipeline_run_id", "site_no", "bms_id", "target_date", "serial_number",
+                    "sensing_datetime", "prediction_time", "bank_no", "rack_no", "string_no", "module_no",
+                    *[f"cell_{i}_score" for i in range(1, 21)],
+                    *[f"cell_{i}_level" for i in range(1, 21)],
+                    "max_score", "max_level", "average_score", "inserted", "updated",
+                ] if col in columns
+            ]
+            if not selected:
+                return None
+            select_sql = ", ".join(f'"{col}"' for col in selected)
+            order_candidates = [col for col in ["max_score", "prediction_time", "sensing_datetime", "inserted", "id"] if col in columns]
+            order_sql = ", ".join(f'"{col}" DESC NULLS LAST' for col in order_candidates)
+            if bms_id and "bms_id" in columns:
+                row = await conn.fetchrow(
+                    f'SELECT {select_sql} FROM "anomaly_score" WHERE "site_no" = $1 AND "bms_id" = $2 ORDER BY {order_sql} LIMIT 1',
+                    site_no,
+                    bms_id,
+                )
+            else:
+                row = await conn.fetchrow(
+                    f'SELECT {select_sql} FROM "anomaly_score" WHERE "site_no" = $1 ORDER BY {order_sql} LIMIT 1',
+                    site_no,
+                )
+            return {key: _json_safe(value) for key, value in dict(row).items()} if row else None
+        finally:
+            await conn.close()
+
+    async def _columns_with_conn(self, conn: Any, table_name: str) -> list[str]:
+        rows = await conn.fetch(
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = $1
+            ORDER BY ordinal_position
+            """,
+            table_name,
+        )
+        return [row["column_name"] for row in rows]
+
+
 def _json_safe(value: Any) -> Any:
     if value is None:
         return None
