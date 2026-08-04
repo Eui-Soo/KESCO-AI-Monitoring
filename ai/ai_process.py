@@ -32,17 +32,66 @@ import json
 import logging
 import os
 import re
+import warnings
 from datetime import date, datetime
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
+# ============================================================
+# TensorFlow log / warning setting
+# ============================================================
+# TensorFlow C++ 로그 숨김
+# 0: 전체 출력
+# 1: INFO 숨김
+# 2: INFO + WARNING 숨김
+# 3: INFO + WARNING + ERROR 숨김
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
+
+# oneDNN 관련 안내 메시지 숨김
+# 예: "oneDNN custom operations are on..."
+os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
+
+# Python warning 숨김
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=UserWarning)
+
 import numpy as np
 import pandas as pd
 import tensorflow as tf
+
+logger = logging.getLogger("app")
+
+
+# ============================================================
+# TensorFlow GPU memory setting
+# ============================================================
+def _configure_tensorflow_runtime() -> None:
+    """TensorFlow 로그를 줄이고, GPU 메모리를 필요한 만큼만 사용하도록 설정한다."""
+    try:
+        # TensorFlow Python logger 줄이기
+        tf.get_logger().setLevel("ERROR")
+
+        gpus = tf.config.list_physical_devices("GPU")
+
+        if not gpus:
+            logger.info("TensorFlow GPU 없음 - CPU 모드로 실행")
+            return
+
+        for gpu in gpus:
+            tf.config.experimental.set_memory_growth(gpu, True)
+
+        logger.info(f"TensorFlow GPU memory growth 활성화 완료: {len(gpus)}개 GPU")
+
+    except Exception as exc:
+        logger.warning(f"TensorFlow runtime 설정 실패: {exc}")
+
+
+_configure_tensorflow_runtime()
+
 from tensorflow.keras import layers, models
 
 
-logger = logging.getLogger("app")
+
 
 INPUT_LEN = 288
 DAY_STRIDE = 288

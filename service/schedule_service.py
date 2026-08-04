@@ -15,10 +15,12 @@
 - 실제 STGCN 모델 추론은 다음 단계에서 AIProcessingService 쪽에 붙인다.
 - 여기서는 rolling 7일 조건을 스케줄 흐름에 먼저 넣는다.
 """
+import asyncio
 import inspect
 import logging
+import uuid
 from datetime import date, datetime, timedelta
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -52,6 +54,12 @@ class SchedulerService:
 
         self._scheduler = AsyncIOScheduler()
         self._is_running = False
+
+        # run-range 백그라운드 실행 상태는 우선 메모리에서 관리한다.
+        # 서버가 재시작되면 이 상태는 초기화된다.
+        # 운영 고도화 단계에서는 별도 DB 테이블로 영속화하는 것을 권장한다.
+        self._range_runs: Dict[str, Dict] = {}
+        self._range_run_tasks: Dict[str, asyncio.Task] = {}
 
         logger.info("SchedulerService 초기화 완료")
 
@@ -93,6 +101,332 @@ class SchedulerService:
 
         self._scheduler.shutdown(wait=False)
         logger.info("스케줄러 종료 완료")
+
+    def start_range_run_background(
+        self,
+        start_date: date,
+        end_date: date,
+        site_no: int,
+        bms_id: str,
+        force: Optional[bool] = None,
+    ) -> Dict:
+        """기간 분석 작업을 백그라운드로 등록한다.
+
+        기존 POST /api/v1/pipeline/run-range는 요청이 끝날 때까지
+        기다리는 동기 실행 방식이다.
+
+        이 함수는 긴 기간 분석에서 Swagger/브라우저 timeout을 피하기 위해
+        즉시 range_run_id를 반환하고 실제 분석은 event loop의 task로 실행한다.
+        """
+
+        if self._has_active_range_run():
+            raise RuntimeError(
+                "Another range run is already queued or running. "
+                "Wait until the current range run is completed."
+            )
+
+        effective_force = (
+            self._settings.FORCE_RERUN_DEFAULT
+            if force is None
+            else force
+        )
+
+        if effective_force and not self._settings.FORCE_RERUN_ENABLED:
+            raise ValueError(
+                "Force rerun is disabled by server setting. "
+                "Set FORCE_RERUN_ENABLED=true to allow force=true."
+            )
+
+        range_run_id = self._make_range_run_id(
+            start_date=start_date,
+            end_date=end_date,
+            site_no=site_no,
+            bms_id=bms_id,
+        )
+
+        now_text = datetime.now().isoformat(timespec="seconds")
+        total_days = (end_date - start_date).days + 1
+
+        range_run = {
+            "range_run_id": range_run_id,
+            "status": "queued",
+            "message": "Range pipeline job queued.",
+            "started_at": now_text,
+            "updated_at": now_text,
+            "finished_at": None,
+            "current_date": None,
+            "request": {
+                "start_date": start_date.isoformat(),
+                "end_date": end_date.isoformat(),
+                "site_no": site_no,
+                "bms_id": bms_id,
+                "force": effective_force,
+            },
+            "settings": {
+                "force_rerun_enabled": self._settings.FORCE_RERUN_ENABLED,
+                "force_rerun_default": self._settings.FORCE_RERUN_DEFAULT,
+            },
+            "summary": {
+                "total_days": total_days,
+                "completed_days": 0,
+                "success_count": 0,
+                "waiting_count": 0,
+                "empty_count": 0,
+                "error_count": 0,
+                "skipped_count": 0,
+                "skipped_existing_count": 0,
+            },
+            "results": [],
+            "error_message": None,
+        }
+
+        self._range_runs[range_run_id] = range_run
+
+        task = asyncio.create_task(
+            self._run_range_pipeline_background(
+                range_run_id=range_run_id,
+                start_date=start_date,
+                end_date=end_date,
+                site_no=site_no,
+                bms_id=bms_id,
+                force=effective_force,
+            )
+        )
+
+        self._range_run_tasks[range_run_id] = task
+
+        logger.info(
+            "기간 AI 파이프라인 백그라운드 작업 등록 완료 "
+            f"[range_run_id={range_run_id}, start_date={start_date}, "
+            f"end_date={end_date}, site_no={site_no}, bms_id={bms_id}, "
+            f"force={effective_force}]"
+        )
+
+        return range_run
+
+    def get_range_run_status(self, range_run_id: str) -> Optional[Dict]:
+        """백그라운드 기간 분석 작업 상태를 조회한다."""
+
+        return self._range_runs.get(range_run_id)
+
+    def get_recent_range_runs(self, limit: int = 20) -> List[Dict]:
+        """최근 백그라운드 기간 분석 작업 목록을 조회한다."""
+
+        rows = list(self._range_runs.values())
+        rows.sort(key=lambda item: item.get("started_at") or "", reverse=True)
+
+        return rows[:limit]
+
+    async def _run_range_pipeline_background(
+        self,
+        range_run_id: str,
+        start_date: date,
+        end_date: date,
+        site_no: int,
+        bms_id: str,
+        force: bool,
+    ) -> None:
+        """기간 분석 작업을 실제로 수행한다."""
+
+        range_run = self._range_runs[range_run_id]
+        range_run["status"] = "running"
+        range_run["message"] = "Range pipeline job is running."
+        range_run["updated_at"] = datetime.now().isoformat(timespec="seconds")
+
+        current_date = start_date
+
+        try:
+            while current_date <= end_date:
+                range_run["current_date"] = current_date.isoformat()
+                range_run["updated_at"] = datetime.now().isoformat(timespec="seconds")
+
+                day_result = await self._run_range_pipeline_day(
+                    current_date=current_date,
+                    site_no=site_no,
+                    bms_id=bms_id,
+                    force=force,
+                )
+
+                range_run["results"].append(day_result)
+                self._refresh_range_run_summary(range_run)
+
+                current_date = current_date + timedelta(days=1)
+
+                # 긴 작업 중 다른 coroutine이 실행될 수 있게 event loop에 양보한다.
+                await asyncio.sleep(0)
+
+            final_status = self._decide_range_run_status(range_run["results"])
+            range_run["status"] = final_status
+            range_run["message"] = "Range pipeline job completed."
+            range_run["current_date"] = None
+            range_run["finished_at"] = datetime.now().isoformat(timespec="seconds")
+            range_run["updated_at"] = range_run["finished_at"]
+
+            logger.info(
+                "기간 AI 파이프라인 백그라운드 작업 완료 "
+                f"[range_run_id={range_run_id}, status={final_status}]"
+            )
+
+        except Exception as exc:
+            error_message = str(exc)
+
+            range_run["status"] = "error"
+            range_run["message"] = "Range pipeline job failed."
+            range_run["error_message"] = error_message
+            range_run["finished_at"] = datetime.now().isoformat(timespec="seconds")
+            range_run["updated_at"] = range_run["finished_at"]
+
+            logger.exception(
+                "기간 AI 파이프라인 백그라운드 작업 실패 "
+                f"[range_run_id={range_run_id}, error={error_message}]"
+            )
+
+        finally:
+            self._range_run_tasks.pop(range_run_id, None)
+
+    async def _run_range_pipeline_day(
+        self,
+        current_date: date,
+        site_no: int,
+        bms_id: str,
+        force: bool,
+    ) -> Dict:
+        """기간 분석 중 하루치 작업을 실행한다."""
+
+        has_completed_result = await self._db_local_service.exists_success_pipeline_result_by_date(
+            target_date=current_date,
+            site_no=site_no,
+            bms_id=bms_id,
+        )
+
+        if has_completed_result and not force:
+            return {
+                "date": current_date.isoformat(),
+                "status": "skipped_existing",
+                "message": (
+                    "Completed AI result already exists for this date/site/bms. "
+                    "Use force=true to rerun."
+                ),
+                "skip_basis": "pipeline_run_log.status=success and saved_score_count>0",
+                "run_id": None,
+                "battery_count": 0,
+                "preprocessed_count": 0,
+                "saved_score_count": 0,
+                "raw_file_path": None,
+                "preprocessed_file_path": None,
+                "result_file_path": None,
+                "error_message": None,
+            }
+
+        result = await self.run_once(
+            target_date=current_date,
+            site_no=site_no,
+            bms_id=bms_id,
+        )
+
+        return {
+            "date": current_date.isoformat(),
+            "status": result.get("status"),
+            "message": result.get("message"),
+            "run_id": result.get("run_id"),
+            "battery_count": result.get("battery_count", 0),
+            "preprocessed_count": result.get("preprocessed_count", 0),
+            "preprocess_day_count": result.get("preprocess_day_count", 0),
+            "saved_score_count": result.get("saved_score_count", 0),
+            "loaded_dates": result.get("loaded_dates"),
+            "raw_file_path": result.get("raw_file_path"),
+            "preprocessed_file_path": result.get("preprocessed_file_path"),
+            "result_file_path": result.get("result_file_path"),
+            "error_message": result.get("error_message"),
+        }
+
+    def _refresh_range_run_summary(self, range_run: Dict) -> None:
+        """기간 분석 작업의 진행률/집계 정보를 갱신한다."""
+
+        results = range_run.get("results", [])
+        summary = range_run["summary"]
+
+        summary["completed_days"] = len(results)
+        summary["success_count"] = sum(
+            1 for item in results if item.get("status") == "success"
+        )
+        summary["waiting_count"] = sum(
+            1 for item in results if item.get("status") == "waiting_7days"
+        )
+        summary["empty_count"] = sum(
+            1 for item in results if item.get("status") == "empty"
+        )
+        summary["error_count"] = sum(
+            1 for item in results if item.get("status") == "error"
+        )
+        summary["skipped_count"] = sum(
+            1 for item in results if item.get("status") == "skipped"
+        )
+        summary["skipped_existing_count"] = sum(
+            1 for item in results if item.get("status") == "skipped_existing"
+        )
+
+    def _decide_range_run_status(self, results: List[Dict]) -> str:
+        """날짜별 실행 결과를 바탕으로 기간 작업 최종 상태를 결정한다."""
+
+        if not results:
+            return "empty"
+
+        error_count = sum(1 for item in results if item.get("status") == "error")
+        success_count = sum(1 for item in results if item.get("status") == "success")
+        waiting_count = sum(1 for item in results if item.get("status") == "waiting_7days")
+        empty_count = sum(1 for item in results if item.get("status") == "empty")
+        skipped_existing_count = sum(
+            1 for item in results if item.get("status") == "skipped_existing"
+        )
+        skipped_count = sum(1 for item in results if item.get("status") == "skipped")
+
+        if error_count > 0:
+            return "partial_error"
+
+        if success_count > 0:
+            return "success"
+
+        if waiting_count > 0:
+            return "waiting_7days"
+
+        if empty_count > 0:
+            return "empty"
+
+        if skipped_existing_count > 0:
+            return "skipped_existing"
+
+        if skipped_count > 0:
+            return "skipped"
+
+        return "unknown"
+
+    def _has_active_range_run(self) -> bool:
+        """현재 실행 중이거나 대기 중인 기간 분석 작업이 있는지 확인한다."""
+
+        for item in self._range_runs.values():
+            if item.get("status") in {"queued", "running"}:
+                return True
+
+        return False
+
+    def _make_range_run_id(
+        self,
+        start_date: date,
+        end_date: date,
+        site_no: int,
+        bms_id: str,
+    ) -> str:
+        """기간 분석 작업 ID를 생성한다."""
+
+        safe_bms_id = self._make_ess_id(site_no=site_no, bms_id=bms_id)
+        suffix = uuid.uuid4().hex[:8]
+
+        return (
+            f"RANGE_{datetime.now():%Y%m%d_%H%M%S}_"
+            f"{start_date.isoformat()}_{end_date.isoformat()}_"
+            f"{safe_bms_id}_{suffix}"
+        )
 
     async def run_once(
         self,
@@ -517,15 +851,19 @@ class SchedulerService:
                 reference_date=target_date
             )
 
-            preprocess_day_count = self._file_service.count_preprocess_days(
+            available_preprocess_dates = self._file_service.list_preprocessed_dates(
                 ess_id=ess_id,
+                end_date=target_date,
             )
+
+            preprocess_day_count = len(available_preprocess_dates)
 
             if preprocess_day_count < self._settings.AI_MIN_PREPROCESS_DAYS:
                 message = (
-                    "Waiting for enough preprocess days. "
+                    "Waiting for enough accumulated preprocess days. "
                     f"current_days={preprocess_day_count}, "
-                    f"required_days={self._settings.AI_MIN_PREPROCESS_DAYS}"
+                    f"required_days={self._settings.AI_MIN_PREPROCESS_DAYS}, "
+                    f"target_date={target_date}, site_no={site_no}, bms_id={bms_id}"
                 )
 
                 await self._db_local_service.mark_pipeline_success(
@@ -540,9 +878,10 @@ class SchedulerService:
                 )
 
                 logger.info(
-                    "AI 실행 대기 "
+                    "AI 실행 대기 - 누적 전처리 일수 부족 "
                     f"[ess_id={ess_id}, current_days={preprocess_day_count}, "
-                    f"required_days={self._settings.AI_MIN_PREPROCESS_DAYS}]"
+                    f"required_days={self._settings.AI_MIN_PREPROCESS_DAYS}, "
+                    f"available_dates={[d.isoformat() for d in available_preprocess_dates]}]"
                 )
 
                 return {
@@ -557,6 +896,9 @@ class SchedulerService:
                     "preprocessed_count": preprocessed_count,
                     "preprocess_day_count": preprocess_day_count,
                     "required_days": self._settings.AI_MIN_PREPROCESS_DAYS,
+                    "available_preprocess_dates": [
+                        d.isoformat() for d in available_preprocess_dates
+                    ],
                     "saved_score_count": 0,
                     "raw_file_path": raw_file_path,
                     "preprocessed_file_path": preprocessed_file_path,
@@ -564,18 +906,17 @@ class SchedulerService:
                     "deleted_preprocessed_count": deleted_preprocessed_count,
                 }
 
-            rolling_preprocessed_data = self._load_recent_preprocessed_data(
-                ess_id=ess_id,
-                target_date=target_date,
+            accumulated_preprocessed_data, loaded_dates = (
+                self._load_accumulated_preprocessed_data(
+                    ess_id=ess_id,
+                    target_date=target_date,
+                )
             )
 
-            expected_rolling_count = preprocessed_count * self._settings.AI_MIN_PREPROCESS_DAYS
-
-            if len(rolling_preprocessed_data) < expected_rolling_count:
+            if len(loaded_dates) < self._settings.AI_MIN_PREPROCESS_DAYS:
                 message = (
-                    "Waiting for complete rolling preprocess data. "
-                    f"loaded_rows={len(rolling_preprocessed_data)}, "
-                    f"expected_rows={expected_rolling_count}, "
+                    "Waiting for complete accumulated preprocess data. "
+                    f"loaded_days={len(loaded_dates)}, "
                     f"required_days={self._settings.AI_MIN_PREPROCESS_DAYS}, "
                     f"target_date={target_date}, site_no={site_no}, bms_id={bms_id}"
                 )
@@ -603,8 +944,8 @@ class SchedulerService:
                     "target_date": target_date.isoformat(),
                     "battery_count": battery_count,
                     "preprocessed_count": preprocessed_count,
-                    "rolling_loaded_count": len(rolling_preprocessed_data),
-                    "expected_rolling_count": expected_rolling_count,
+                    "preprocess_day_count": preprocess_day_count,
+                    "loaded_dates": loaded_dates,
                     "saved_score_count": 0,
                     "raw_file_path": raw_file_path,
                     "preprocessed_file_path": preprocessed_file_path,
@@ -612,8 +953,9 @@ class SchedulerService:
                     "deleted_preprocessed_count": deleted_preprocessed_count,
                 }
 
-
-            scores = await self._ai_processing_service.run(rolling_preprocessed_data)
+            scores = await self._ai_processing_service.run(
+                accumulated_preprocessed_data
+            )
 
             if not scores:
                 raise RuntimeError(
@@ -714,30 +1056,42 @@ class SchedulerService:
                 "saved_score_count": saved_score_count,
             }
 
-    def _load_recent_preprocessed_data(
+    def _load_accumulated_preprocessed_data(
         self,
         ess_id: str,
         target_date: date,
-    ) -> List[dict]:
-        """AI 입력용 최근 N일 전처리 데이터를 읽어온다.
+    ) -> Tuple[List[dict], List[str]]:
+        """AI 입력용 누적 N일 전처리 데이터를 읽어온다.
+
+        기준:
+        - target_date 이하의 전처리 날짜만 사용한다.
+        - 날짜가 연속될 필요는 없다.
+        - 사용 가능한 날짜 중 가장 최근 N개 날짜를 사용한다.
 
         예:
             AI_MIN_PREPROCESS_DAYS=7
-            target_date=2026-01-07
+            target_date=2026-07-10
 
-            읽는 날짜:
-            2026-01-01 ~ 2026-01-07
+            전처리 파일 존재 날짜:
+            2026-07-01, 2026-07-03, 2026-07-04,
+            2026-07-06, 2026-07-07, 2026-07-09, 2026-07-10
+
+            위 7개 날짜의 파일을 모두 읽어서 AI 입력으로 사용한다.
         """
 
         required_days = self._settings.AI_MIN_PREPROCESS_DAYS
-        start_date = target_date - timedelta(days=required_days - 1)
+
+        available_dates = self._file_service.list_preprocessed_dates(
+            ess_id=ess_id,
+            end_date=target_date,
+        )
+
+        selected_dates = available_dates[-required_days:]
 
         rows: List[dict] = []
         loaded_dates: List[str] = []
 
-        for day_offset in range(required_days):
-            current_date = start_date + timedelta(days=day_offset)
-
+        for current_date in selected_dates:
             daily_rows = self._file_service.read_preprocessed(
                 ess_id=ess_id,
                 target_date=current_date,
@@ -745,7 +1099,7 @@ class SchedulerService:
 
             if not daily_rows:
                 logger.warning(
-                    "AI 입력용 전처리 파일 없음 "
+                    "AI 입력용 전처리 파일은 있으나 데이터가 비어 있음 "
                     f"[ess_id={ess_id}, date={current_date}]"
                 )
                 continue
@@ -754,12 +1108,12 @@ class SchedulerService:
             loaded_dates.append(current_date.isoformat())
 
         logger.info(
-            "AI 입력용 rolling preprocess 로드 완료 "
+            "AI 입력용 누적 preprocess 로드 완료 "
             f"[ess_id={ess_id}, target_date={target_date}, "
             f"days={loaded_dates}, rows={len(rows)}]"
         )
 
-        return rows
+        return rows, loaded_dates
     
     
     def _attach_score_metadata(

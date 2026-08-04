@@ -44,6 +44,13 @@ class PipelineRunRepository:
         message: Optional[str] = None,
         site_no: Optional[int] = None,
         bms_id: Optional[str] = None,
+        model_name: Optional[str] = None,
+        model_version: Optional[str] = None,
+        model_maker: Optional[str] = None,
+        model_root: Optional[str] = None,
+        fold_count: Optional[int] = None,
+        preprocess_version: Optional[str] = None,
+        code_version: Optional[str] = None,
     ) -> PipelineRunLog:
         """파이프라인 실행 시작 로그 생성
 
@@ -67,6 +74,9 @@ class PipelineRunRepository:
             bms_id:
                 관제 DB 기준 BMS ID 또는 dvc_id
 
+            model_name / model_version / preprocess_version:
+                해당 실행 결과를 만든 AI 모델과 전처리 버전 정보
+
         Returns:
             생성된 PipelineRunLog ORM 객체
         """
@@ -77,6 +87,13 @@ class PipelineRunRepository:
             bms_id=bms_id,
             target_date=target_date,
             status="running",
+            model_name=model_name,
+            model_version=model_version,
+            model_maker=model_maker,
+            model_root=model_root,
+            fold_count=fold_count,
+            preprocess_version=preprocess_version,
+            code_version=code_version,
             message=message or "AI pipeline started.",
         )
 
@@ -123,11 +140,16 @@ class PipelineRunRepository:
         battery_count: int = 0,
         saved_score_count: int = 0,
         deleted_preprocessed_count: int = 0,
+        raw_file_path: Optional[str] = None,
+        preprocessed_file_path: Optional[str] = None,
+        result_file_path: Optional[str] = None,
         message: Optional[str] = None,
     ) -> None:
-        """조회된 배터리 데이터가 없을 때 empty 처리
+        """조회/전처리 결과가 비었을 때 empty 처리
 
         데이터가 없는 것은 서버 오류가 아니므로 error가 아니라 empty로 남긴다.
+        단, raw 저장 이후 전처리 결과가 비는 경우에는 raw_file_path가 존재할 수 있으므로
+        전달받은 파일 경로는 실행 이력에 그대로 보존한다.
         """
 
         log = await session.get(PipelineRunLog, run_id)
@@ -140,10 +162,10 @@ class PipelineRunRepository:
         log.battery_count = battery_count
         log.saved_score_count = saved_score_count
         log.deleted_preprocessed_count = deleted_preprocessed_count
-        log.raw_file_path = None
-        log.preprocessed_file_path = None
-        log.result_file_path = None
-        log.message = message or "No battery data found for target date."
+        log.raw_file_path = raw_file_path
+        log.preprocessed_file_path = preprocessed_file_path
+        log.result_file_path = result_file_path
+        log.message = message or "No battery data found or preprocess result is empty."
         log.error_message = None
 
     async def mark_error(
@@ -210,6 +232,37 @@ class PipelineRunRepository:
 
         return self._to_dict(row)
 
+    async def find_latest_by_date(
+        self,
+        session: AsyncSession,
+        target_date,
+        site_no: Optional[int] = None,
+        bms_id: Optional[str] = None,
+    ) -> Optional[Dict]:
+        """특정 날짜/site/bms 기준 가장 최근 파이프라인 실행 이력을 조회한다."""
+
+        stmt = select(PipelineRunLog).where(PipelineRunLog.target_date == target_date)
+
+        if site_no is not None:
+            stmt = stmt.where(PipelineRunLog.site_no == site_no)
+
+        if bms_id is not None:
+            stmt = stmt.where(PipelineRunLog.bms_id == bms_id)
+
+        stmt = (
+            stmt
+            .order_by(desc(PipelineRunLog.started_at), desc(PipelineRunLog.id))
+            .limit(1)
+        )
+
+        result = await session.execute(stmt)
+        row = result.scalar_one_or_none()
+
+        if row is None:
+            return None
+
+        return self._to_dict(row)
+
     async def find_recent(
         self,
         session: AsyncSession,
@@ -241,6 +294,47 @@ class PipelineRunRepository:
 
         return [self._to_dict(row) for row in rows]
 
+
+    async def exists_success_result_by_date(
+        self,
+        session: AsyncSession,
+        target_date,
+        site_no: Optional[int] = None,
+        bms_id: Optional[str] = None,
+    ) -> bool:
+        """특정 날짜/site/bms 기준으로 성공 완료된 AI 결과가 있는지 확인한다.
+
+        force=false 스킵 기준으로 사용한다.
+
+        단순히 anomaly_score row가 1건이라도 있는지만 보면,
+        일부 결과만 저장된 불완전한 날짜도 완료된 것으로 오판할 수 있다.
+        따라서 pipeline_run_log에서 아래 조건을 만족하는 실행 이력이 있을 때만
+        기존 결과가 있다고 판단한다.
+
+        조건:
+            - target_date 일치
+            - site_no / bms_id 일치
+            - status = 'success'
+            - saved_score_count > 0
+        """
+
+        stmt = select(PipelineRunLog.id).where(
+            PipelineRunLog.target_date == target_date,
+            PipelineRunLog.status == "success",
+            PipelineRunLog.saved_score_count > 0,
+        )
+
+        if site_no is not None:
+            stmt = stmt.where(PipelineRunLog.site_no == site_no)
+
+        if bms_id is not None:
+            stmt = stmt.where(PipelineRunLog.bms_id == bms_id)
+
+        stmt = stmt.order_by(desc(PipelineRunLog.finished_at), desc(PipelineRunLog.id)).limit(1)
+
+        result = await session.execute(stmt)
+        return result.scalar_one_or_none() is not None
+
     def _to_dict(self, row: PipelineRunLog) -> Dict:
         """ORM 객체를 API 응답용 dict로 변환"""
 
@@ -259,6 +353,15 @@ class PipelineRunRepository:
             "raw_file_path": row.raw_file_path,
             "preprocessed_file_path": row.preprocessed_file_path,
             "result_file_path": row.result_file_path,
+            "model_info": {
+                "model_name": row.model_name,
+                "model_version": row.model_version,
+                "model_maker": row.model_maker,
+                "model_root": row.model_root,
+                "fold_count": row.fold_count,
+                "preprocess_version": row.preprocess_version,
+                "code_version": row.code_version,
+            },
             "message": row.message,
             "error_message": row.error_message,
             "inserted": row.inserted.isoformat() if row.inserted else None,

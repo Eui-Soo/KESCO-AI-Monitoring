@@ -74,59 +74,6 @@ class DBRemoteService:
 
         return rows
 
-    async def find_battery_data_range(
-        self,
-        site_no: Optional[int] = None,
-        bms_id: Optional[str] = None,
-    ) -> Dict:
-        """관제 DB에 저장된 배터리 원본 데이터 보유 기간을 조회한다."""
-
-        async with self._session_factory() as session:
-            data_range = await self._battery_repo.find_data_range(
-                session=session,
-                site_no=site_no,
-                bms_id=bms_id,
-            )
-
-        logger.info(
-            "✅ 원격 배터리 데이터 보유 기간 조회 완료 "
-            f"[site_no={site_no}, bms_id={bms_id}, "
-            f"available={data_range.get('available')}]"
-        )
-
-        return data_range
-
-    async def find_battery_data_quality(
-        self,
-        start_date: date,
-        end_date: date,
-        site_no: Optional[int] = None,
-        bms_id: Optional[str] = None,
-        expected_row_count_per_day: Optional[int] = None,
-        minimum_completeness_rate: float = 0.8,
-    ) -> Dict:
-        """관제 DB 원본 배터리 데이터의 일자별 품질 정보를 조회한다."""
-
-        async with self._session_factory() as session:
-            quality = await self._battery_repo.find_data_quality(
-                session=session,
-                start_date=start_date,
-                end_date=end_date,
-                site_no=site_no,
-                bms_id=bms_id,
-                expected_row_count_per_day=expected_row_count_per_day,
-                minimum_completeness_rate=minimum_completeness_rate,
-            )
-
-        logger.info(
-            "✅ 원격 배터리 데이터 품질 조회 완료 "
-            f"[start_date={start_date}, end_date={end_date}, "
-            f"site_no={site_no}, bms_id={bms_id}, "
-            f"status={quality.get('status')}]"
-        )
-
-        return quality
-
     async def find_sites(self) -> List[Dict]:
         """관제 DB에서 사이트/장치 목록을 조회한다."""
 

@@ -12,7 +12,6 @@
 import logging
 from typing import Dict, List, Optional
 
-from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -37,8 +36,6 @@ class DBLocalService:
     """우리 AI 결과 DB 서비스"""
 
     def __init__(self, settings: Settings):
-        self._settings = settings
-
         self._engine: AsyncEngine = create_async_engine(
             settings.async_db_url,
             pool_size=settings.DB_POOL_SIZE,
@@ -61,53 +58,13 @@ class DBLocalService:
         logger.info("✅ DBLocalService 초기화 완료")
 
     async def init_db(self) -> None:
-        """로컬 DB 테이블 생성 및 운영 중 추가 컬럼 보정"""
+        """로컬 DB 테이블 생성"""
 
         async with self._engine.connect() as conn:
             async with conn.begin():
                 await conn.run_sync(Base.metadata.create_all)
 
-        await self._ensure_schema_upgrades()
-
-        logger.info(f"✅ DB 테이블 생성/스키마 보정 완료: {list(Base.metadata.tables.keys())}")
-
-    async def _ensure_schema_upgrades(self) -> None:
-        """기존 로컬 DB에 새 컬럼을 추가한다.
-
-        SQLAlchemy create_all()은 이미 존재하는 테이블에 컬럼을 자동 추가하지 않는다.
-        현장 DB를 유지하면서 버전 추적 컬럼을 추가하기 위해
-        PostgreSQL의 ADD COLUMN IF NOT EXISTS를 사용한다.
-        """
-
-        alter_statements = [
-            "ALTER TABLE pipeline_run_log ADD COLUMN IF NOT EXISTS model_name VARCHAR(100)",
-            "ALTER TABLE pipeline_run_log ADD COLUMN IF NOT EXISTS model_version VARCHAR(50)",
-            "ALTER TABLE pipeline_run_log ADD COLUMN IF NOT EXISTS model_maker VARCHAR(100)",
-            "ALTER TABLE pipeline_run_log ADD COLUMN IF NOT EXISTS model_root TEXT",
-            "ALTER TABLE pipeline_run_log ADD COLUMN IF NOT EXISTS fold_count INTEGER",
-            "ALTER TABLE pipeline_run_log ADD COLUMN IF NOT EXISTS preprocess_version VARCHAR(50)",
-            "ALTER TABLE pipeline_run_log ADD COLUMN IF NOT EXISTS code_version VARCHAR(50)",
-        ]
-
-        async with self._engine.connect() as conn:
-            async with conn.begin():
-                for stmt in alter_statements:
-                    await conn.execute(text(stmt))
-
-        logger.info("✅ pipeline_run_log 모델/버전 추적 컬럼 보정 완료")
-
-    def get_model_metadata(self) -> Dict:
-        """현재 서버 설정 기준 모델/전처리 버전 정보를 반환한다."""
-
-        return {
-            "model_name": self._settings.AI_MODEL_NAME,
-            "model_version": self._settings.AI_MODEL_VERSION,
-            "model_maker": self._settings.AI_MODEL_MAKER,
-            "model_root": self._settings.AI_MODEL_ROOT,
-            "fold_count": self._settings.AI_MODEL_FOLD_COUNT,
-            "preprocess_version": self._settings.AI_PREPROCESS_VERSION,
-            "code_version": self._settings.AI_CODE_VERSION,
-        }
+        logger.info(f"✅ DB 테이블 생성 완료: {list(Base.metadata.tables.keys())}")
 
     # ============================================================
     # Site / Device
@@ -255,36 +212,6 @@ class DBLocalService:
 
         return scores
 
-    async def find_anomaly_scores_by_date_range(
-        self,
-        start_date,
-        end_date,
-        site_no: Optional[int] = None,
-        bms_id: Optional[str] = None,
-    ) -> List[dict]:
-        """특정 기간의 날짜별 최신 AI 결과 데이터를 조회한다."""
-
-        async with self._session_factory() as session:
-            from repo.anomaly_repo import AnomalyScoreRepository
-
-            repo = AnomalyScoreRepository()
-            scores = await repo.find_latest_by_date_range(
-                session=session,
-                start_date=start_date,
-                end_date=end_date,
-                site_no=site_no,
-                bms_id=bms_id,
-            )
-
-        logger.info(
-            "✅ 기간별 AI 결과 데이터 조회 완료 "
-            f"[start_date={start_date}, end_date={end_date}, "
-            f"site_no={site_no}, bms_id={bms_id}, count={len(scores)}건]"
-        )
-
-        return scores
-
-
     # ============================================================
     # Pipeline Run Log
     # ============================================================
@@ -299,8 +226,6 @@ class DBLocalService:
     ) -> int:
         """파이프라인 실행 시작 로그 생성"""
 
-        model_metadata = self.get_model_metadata()
-
         async with self._session_factory() as session:
             async with session.begin():
                 from repo.pipeline_run_repo import PipelineRunRepository
@@ -313,22 +238,13 @@ class DBLocalService:
                     message=message,
                     site_no=site_no,
                     bms_id=bms_id,
-                    model_name=model_metadata["model_name"],
-                    model_version=model_metadata["model_version"],
-                    model_maker=model_metadata["model_maker"],
-                    model_root=model_metadata["model_root"],
-                    fold_count=model_metadata["fold_count"],
-                    preprocess_version=model_metadata["preprocess_version"],
-                    code_version=model_metadata["code_version"],
                 )
                 run_id = log.id
 
         logger.info(
             "✅ PipelineRunLog 시작 기록 완료 "
             f"[run_id={run_id}, ess_id={ess_id}, "
-            f"site_no={site_no}, bms_id={bms_id}, "
-            f"model={model_metadata['model_name']}:{model_metadata['model_version']}, "
-            f"preprocess={model_metadata['preprocess_version']}]"
+            f"site_no={site_no}, bms_id={bms_id}]"
         )
 
         return run_id
@@ -371,17 +287,9 @@ class DBLocalService:
         battery_count: int = 0,
         saved_score_count: int = 0,
         deleted_preprocessed_count: int = 0,
-        raw_file_path: Optional[str] = None,
-        preprocessed_file_path: Optional[str] = None,
-        result_file_path: Optional[str] = None,
         message: Optional[str] = None,
     ) -> None:
-        """파이프라인 empty 처리
-
-        원본 데이터는 있었지만 전처리 결과가 비는 경우처럼,
-        empty 상태에서도 raw/preprocessed/result 파일 경로가 존재할 수 있다.
-        그래서 파일 경로를 선택적으로 받아 실행 이력에 남긴다.
-        """
+        """파이프라인 empty 처리"""
 
         async with self._session_factory() as session:
             async with session.begin():
@@ -394,9 +302,6 @@ class DBLocalService:
                     battery_count=battery_count,
                     saved_score_count=saved_score_count,
                     deleted_preprocessed_count=deleted_preprocessed_count,
-                    raw_file_path=raw_file_path,
-                    preprocessed_file_path=preprocessed_file_path,
-                    result_file_path=result_file_path,
                     message=message,
                 )
 
@@ -484,141 +389,8 @@ class DBLocalService:
 
         return runs
 
-
-    async def exists_success_pipeline_result_by_date(
-        self,
-        target_date,
-        site_no: Optional[int] = None,
-        bms_id: Optional[str] = None,
-    ) -> bool:
-        """특정 날짜/site/bms 기준 성공 완료된 AI 결과 존재 여부를 확인한다.
-
-        force=false일 때 재실행을 건너뛸지 판단하는 기준이다.
-        anomaly_score row 존재 여부가 아니라 pipeline_run_log 기준으로 확인한다.
-
-        완료 인정 조건:
-            - status = 'success'
-            - saved_score_count > 0
-        """
-
-        async with self._session_factory() as session:
-            from repo.pipeline_run_repo import PipelineRunRepository
-
-            repo = PipelineRunRepository()
-            exists = await repo.exists_success_result_by_date(
-                session=session,
-                target_date=target_date,
-                site_no=site_no,
-                bms_id=bms_id,
-            )
-
-        logger.info(
-            "✅ 성공 완료된 AI 결과 존재 여부 확인 "
-            f"[target_date={target_date}, site_no={site_no}, "
-            f"bms_id={bms_id}, exists={exists}]"
-        )
-
-        return exists
-
-    async def find_latest_pipeline_run_by_date(
-        self,
-        target_date,
-        site_no: Optional[int] = None,
-        bms_id: Optional[str] = None,
-    ) -> Optional[Dict]:
-        """특정 날짜/site/bms 기준 가장 최근 파이프라인 실행 이력을 조회한다."""
-
-        async with self._session_factory() as session:
-            from repo.pipeline_run_repo import PipelineRunRepository
-
-            repo = PipelineRunRepository()
-            run = await repo.find_latest_by_date(
-                session=session,
-                target_date=target_date,
-                site_no=site_no,
-                bms_id=bms_id,
-            )
-
-        logger.info(
-            "✅ 날짜별 PipelineRunLog 조회 완료 "
-            f"[target_date={target_date}, site_no={site_no}, bms_id={bms_id}, "
-            f"exists={run is not None}]"
-        )
-
-        return run
-
-    async def count_anomaly_scores_by_pipeline_run_id(
-        self,
-        pipeline_run_id: int,
-    ) -> int:
-        """pipeline_run_id 기준 anomaly_score row 개수를 조회한다."""
-
-        async with self._session_factory() as session:
-            from repo.anomaly_repo import AnomalyScoreRepository
-
-            repo = AnomalyScoreRepository()
-            count = await repo.count_by_pipeline_run_id(
-                session=session,
-                pipeline_run_id=pipeline_run_id,
-            )
-
-        logger.info(
-            "✅ pipeline_run_id 기준 anomaly_score 개수 조회 완료 "
-            f"[pipeline_run_id={pipeline_run_id}, count={count}]"
-        )
-
-        return count
-
-    async def count_anomaly_scores_by_date(
-        self,
-        target_date,
-        site_no: Optional[int] = None,
-        bms_id: Optional[str] = None,
-    ) -> int:
-        """날짜/site/bms 기준 anomaly_score row 개수를 조회한다."""
-
-        async with self._session_factory() as session:
-            from repo.anomaly_repo import AnomalyScoreRepository
-
-            repo = AnomalyScoreRepository()
-            count = await repo.count_by_date(
-                session=session,
-                target_date=target_date,
-                site_no=site_no,
-                bms_id=bms_id,
-            )
-
-        logger.info(
-            "✅ 날짜 기준 anomaly_score 개수 조회 완료 "
-            f"[target_date={target_date}, site_no={site_no}, "
-            f"bms_id={bms_id}, count={count}]"
-        )
-
-        return count
-
     async def close(self) -> None:
         """DB 연결 종료"""
 
         await self._engine.dispose()
         logger.info("✅ DBLocalService 종료 완료")
-
-    async def exists_anomaly_score_by_date(
-        self,
-        target_date,
-        site_no: Optional[int] = None,
-        bms_id: Optional[str] = None,
-    ) -> bool:
-        """특정 날짜/site/bms 기준 AI 결과 존재 여부를 확인한다."""
-
-        async with self._session_factory() as session:
-            from repo.anomaly_repo import AnomalyScoreRepository
-
-            repo = AnomalyScoreRepository()
-            exists = await repo.exists_by_date(
-                session=session,
-                target_date=target_date,
-                site_no=site_no,
-                bms_id=bms_id,
-            )
-
-        return exists

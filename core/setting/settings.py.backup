@@ -119,29 +119,11 @@ class Settings(BaseSettings):
 
     # AI 모델 루트 폴더
     AI_MODEL_ROOT: str = "model"
-
-    # ============================================================
-    # AI Model / Version Metadata
-    # ============================================================
-    # pipeline_run_log에 저장되는 모델/전처리 버전 정보다.
-    # 모델 파일, 전처리 로직, 코드가 변경되면 이 값을 함께 올려야 한다.
-    AI_MODEL_NAME: str = "stgcn_autoencoder"
-    AI_MODEL_VERSION: str = "v1.0.0"
-    AI_MODEL_MAKER: str = "samsung,lg"
-    AI_MODEL_FOLD_COUNT: int = 10
-    AI_PREPROCESS_VERSION: str = "v1.0.0"
-    AI_CODE_VERSION: str = "v1.0.0"
-
-    # ============================================================
-    # Force rerun
-    # ============================================================
-    # true  = force=true API 요청 허용
-    # false = force=true API 요청 차단
-    FORCE_RERUN_ENABLED: bool = True
-
-    # force 파라미터를 생략했을 때 기본값
-    # 운영 안정성을 위해 기본은 False 권장
-    FORCE_RERUN_DEFAULT: bool = False
+    
+    
+    FILES_DIR: str = "files"
+    DEFAULT_ESS_ID: str = "KESCO_ESS_001"
+    PREPROCESSED_RETENTION_DAYS: int = 60
     
     
     @cached_property

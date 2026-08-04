@@ -30,7 +30,7 @@
 from datetime import date
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Query
 
 from core.container import container
 
@@ -109,82 +109,6 @@ async def get_latest_anomaly_scores(
 
 
 @router.get(
-    "/range",
-    summary="Get AI Result Data By Date Range",
-    description="""
-특정 기간의 AI 결과 데이터를 조회한다.
-
-같은 날짜에 파이프라인이 여러 번 실행됐을 수 있으므로,
-각 날짜별 가장 최근 실행 결과만 반환한다.
-
-사용 예:
-- 특정 기간 전체 결과 조회
-  GET /api/v1/anomaly-scores/range?start_date=2026-07-01&end_date=2026-07-10
-
-- 특정 사이트/BMS의 특정 기간 결과 조회
-  GET /api/v1/anomaly-scores/range?start_date=2026-07-01&end_date=2026-07-10&site_no=1&bms_id=BMS001
-""",
-)
-async def get_anomaly_scores_by_date_range(
-    start_date: date = Query(
-        ...,
-        description="조회 시작 날짜. YYYY-MM-DD 형식. 예: 2026-07-01",
-    ),
-    end_date: date = Query(
-        ...,
-        description="조회 종료 날짜. YYYY-MM-DD 형식. 예: 2026-07-10",
-    ),
-    site_no: Optional[int] = Query(
-        default=None,
-        description="관제 DB 사이트 번호. 예: 1",
-    ),
-    bms_id: Optional[str] = Query(
-        default=None,
-        description="관제 DB BMS ID 또는 dvc_id. 예: BMS001",
-    ),
-):
-    """특정 기간 AI 결과 데이터 조회"""
-
-    _validate_date_range(start_date=start_date, end_date=end_date)
-    _validate_site_bms_query(site_no=site_no, bms_id=bms_id)
-
-    db_local_service = container.db_local_service()
-
-    scores = await db_local_service.find_anomaly_scores_by_date_range(
-        start_date=start_date,
-        end_date=end_date,
-        site_no=site_no,
-        bms_id=bms_id,
-    )
-
-    if not scores:
-        return {
-            "status": "empty",
-            "count": 0,
-            "message": "No AI result data found for date range.",
-            "filters": {
-                "start_date": start_date.isoformat(),
-                "end_date": end_date.isoformat(),
-                "site_no": site_no,
-                "bms_id": bms_id,
-            },
-            "results": [],
-        }
-
-    return {
-        "status": "success",
-        "count": len(scores),
-        "message": "AI result data retrieved successfully.",
-        "filters": {
-            "start_date": start_date.isoformat(),
-            "end_date": end_date.isoformat(),
-            "site_no": site_no,
-            "bms_id": bms_id,
-        },
-        "results": scores,
-    }
-
-@router.get(
     "",
     summary="Get AI Result Data By Date",
     description="""
@@ -257,38 +181,3 @@ async def get_anomaly_scores_by_date(
         },
         "results": scores,
     }
-
-
-def _validate_date_range(
-    start_date: date,
-    end_date: date,
-) -> None:
-    """날짜 범위 검증"""
-
-    if start_date > end_date:
-        raise HTTPException(
-            status_code=400,
-            detail="start_date must be less than or equal to end_date.",
-        )
-
-    total_days = (end_date - start_date).days + 1
-    max_days = 366
-
-    if total_days > max_days:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Date range is too long. Maximum allowed days: {max_days}",
-        )
-
-
-def _validate_site_bms_query(
-    site_no: Optional[int],
-    bms_id: Optional[str],
-) -> None:
-    """bms_id를 넣을 경우 site_no도 같이 입력하게 한다."""
-
-    if bms_id and site_no is None:
-        raise HTTPException(
-            status_code=400,
-            detail="site_no is required when bms_id is provided.",
-        )

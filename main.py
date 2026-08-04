@@ -1,9 +1,12 @@
 """KESCO AI API Server Main"""
 
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI
+from fastapi.openapi.docs import get_swagger_ui_html
+from fastapi.staticfiles import StaticFiles
 
 # SQLAlchemy 모델 등록용 import
 # 이 import가 있어야 Base.metadata.create_all() 할 때 테이블들이 등록된다.
@@ -14,6 +17,10 @@ from router.anomaly_router import router as anomaly_router
 from router.health_router import router as health_router
 from router.pipeline_router import router as pipeline_router
 from router.site_router import router as site_router
+
+
+BASE_DIR = Path(__file__).resolve().parent
+SWAGGER_UI_DIR = BASE_DIR / "static" / "swagger-ui"
 
 
 @asynccontextmanager
@@ -77,7 +84,39 @@ KESCO ESS 관제 데이터 기반 AI 분석 API 서버
 """,
     version="1.0.0",
     lifespan=lifespan,
+    docs_url=None,
+    redoc_url=None,
 )
+
+
+# ============================================================
+# Offline Swagger UI
+# ============================================================
+
+app.mount(
+    "/static/swagger-ui",
+    StaticFiles(directory=str(SWAGGER_UI_DIR)),
+    name="swagger-ui",
+)
+
+
+@app.get("/docs", include_in_schema=False)
+async def custom_swagger_ui_html():
+    """외부 CDN 없이 로컬 정적 파일로 Swagger UI를 제공한다."""
+
+    return get_swagger_ui_html(
+        openapi_url=app.openapi_url,
+        title="KESCO AI API Server - Swagger UI",
+        swagger_js_url="/static/swagger-ui/swagger-ui-bundle.js",
+        swagger_css_url="/static/swagger-ui/swagger-ui.css",
+        swagger_favicon_url="/static/swagger-ui/favicon-32x32.png",
+        swagger_ui_parameters={
+            "deepLinking": True,
+            "displayRequestDuration": True,
+            "defaultModelsExpandDepth": -1,
+            "tryItOutEnabled": True,
+        },
+    )
 
 
 # ============================================================
