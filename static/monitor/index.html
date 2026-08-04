@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>KESCO AI Monitoring</title>
+  <link rel="stylesheet" href="/static/monitor/monitor.css" />
+</head>
+<body>
+  <div id="app" class="app-shell">
+    <aside class="sidebar">
+      <div class="brand-area">
+        <div class="kesco-logo"><span>KES</span><i>C</i><span>O</span></div>
+        <div class="brand-title">AI Monitoring</div>
+      </div>
+      <nav class="nav-list" aria-label="main navigation">
+        <button class="nav-item active" data-page="dashboard"><span class="nav-icon">⌂</span><span>대시보드</span></button>
+        <button class="nav-item" data-page="sites"><span class="nav-icon">☷</span><span>사이트 목록</span></button>
+        <button class="nav-item" data-page="detail"><span class="nav-icon">▣</span><span>사이트 상세</span></button>
+        <button class="nav-item" data-page="history"><span class="nav-icon">↺</span><span>실행 이력</span></button>
+        <button class="nav-item" data-page="settings"><span class="nav-icon">⚙</span><span>설정</span></button>
+      </nav>
+      <div class="ess-illustration" aria-hidden="true">
+        <div class="wind w1"></div><div class="wind w2"></div>
+        <div class="ess-box"><div></div><div></div><div></div><span>⚡</span></div>
+        <div class="grid-floor"></div>
+      </div>
+      <div class="sidebar-footer">
+        <div><b>시스템 버전</b><span>v2.3.0</span></div>
+        <div><b>문의/지원</b><span>↗</span></div>
+      </div>
+    </aside>
+
+    <main class="main-panel">
+      <header class="topbar">
+        <div class="topbar-left" id="topbarTitle">대시보드</div>
+        <div class="topbar-right">
+          <div class="status-pill time"><span>◷</span><b>2025-05-19 10:32:48</b></div>
+          <div class="status-pill ok"><span>●</span><b>API 서버 정상</b></div>
+          <div class="status-pill ok"><span>▤</span><b>DB 정상</b></div>
+          <div class="status-pill"><span>◴</span><b>마지막 분석 시각 : 2025-05-19 10:20:15</b></div>
+          <div class="user-chip"><span>관리자</span><div class="avatar"></div></div>
+        </div>
+      </header>
+      <section id="content" class="content"></section>
+      <footer class="footerbar">
+        <span>© 2025 KESCO. All rights reserved.</span>
+        <span>시스템 버전 1.0.0</span>
+        <span>환경: <b>운영 (Production)</b></span>
+        <span>서버: kesco-ai-monitor-01</span>
+        <span>IP: 10.10.10.25</span>
+        <span>사용자: admin</span>
+      </footer>
+    </main>
+  </div>
+  <script src="/static/monitor/monitor.js"></script>
+</body>
+</html>

@@ -6,6 +6,7 @@ from pathlib import Path
 import uvicorn
 from fastapi import FastAPI
 from fastapi.openapi.docs import get_swagger_ui_html
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 # SQLAlchemy 모델 등록용 import
@@ -20,16 +21,15 @@ from router.site_router import router as site_router
 
 
 BASE_DIR = Path(__file__).resolve().parent
-SWAGGER_UI_DIR = BASE_DIR / "static" / "swagger-ui"
+STATIC_DIR = BASE_DIR / "static"
+SWAGGER_UI_DIR = STATIC_DIR / "swagger-ui"
+MONITOR_UI_DIR = STATIC_DIR / "monitor"
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """FastAPI 시작/종료 처리"""
 
-    # ------------------------------------------------------------
-    # Startup
-    # ------------------------------------------------------------
     logger = container.logger()
     settings = container.settings()
 
@@ -38,11 +38,9 @@ async def lifespan(app: FastAPI):
     logger.info(f"🚀 Version: {settings.APP_VERSION}")
     logger.info("==================================================")
 
-    # 1. 로컬 DB 테이블 생성
     db_local_service = container.db_local_service()
     await db_local_service.init_db()
 
-    # 2. 하루 1회 자동 실행 스케줄러 시작
     scheduler_service = container.scheduler_service()
     scheduler_service.start()
 
@@ -50,17 +48,12 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    # ------------------------------------------------------------
-    # Shutdown
-    # ------------------------------------------------------------
     logger.info("==================================================")
     logger.info("🛑 KESCO AI API Server shutting down...")
     logger.info("==================================================")
 
-    # 1. 스케줄러 종료
     scheduler_service.stop()
 
-    # 2. DB 연결 종료
     remote_db_service = container.remote_db_service()
     await remote_db_service.close()
 
@@ -90,19 +83,37 @@ KESCO ESS 관제 데이터 기반 AI 분석 API 서버
 
 
 # ============================================================
-# Offline Swagger UI
+# Static files
 # ============================================================
 
-app.mount(
-    "/static/swagger-ui",
-    StaticFiles(directory=str(SWAGGER_UI_DIR)),
-    name="swagger-ui",
-)
+if SWAGGER_UI_DIR.exists():
+    app.mount(
+        "/static/swagger-ui",
+        StaticFiles(directory=str(SWAGGER_UI_DIR)),
+        name="swagger-ui",
+    )
 
+if MONITOR_UI_DIR.exists():
+    app.mount(
+        "/static/monitor",
+        StaticFiles(directory=str(MONITOR_UI_DIR)),
+        name="monitor-ui",
+    )
+
+
+# ============================================================
+# Offline Swagger UI
+# ============================================================
 
 @app.get("/docs", include_in_schema=False)
 async def custom_swagger_ui_html():
     """외부 CDN 없이 로컬 정적 파일로 Swagger UI를 제공한다."""
+
+    if not SWAGGER_UI_DIR.exists():
+        return {
+            "status": "error",
+            "message": "static/swagger-ui 폴더가 없습니다. 오프라인 Swagger 정적 파일을 먼저 배치하세요.",
+        }
 
     return get_swagger_ui_html(
         openapi_url=app.openapi_url,
@@ -117,6 +128,18 @@ async def custom_swagger_ui_html():
             "tryItOutEnabled": True,
         },
     )
+
+
+# ============================================================
+# Monitor UI
+# ============================================================
+
+@app.get("/monitor", include_in_schema=False)
+@app.get("/monitor/", include_in_schema=False)
+async def monitor_ui():
+    """내부망 AI 모니터링 웹 화면을 제공한다."""
+
+    return FileResponse(str(MONITOR_UI_DIR / "index.html"))
 
 
 # ============================================================
@@ -145,6 +168,7 @@ async def root():
         "app_name": settings.APP_NAME,
         "version": settings.APP_VERSION,
         "docs": "/docs",
+        "monitor": "/monitor",
         "health": "/api/v1/health",
     }
 
