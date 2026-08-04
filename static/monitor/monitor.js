@@ -15,6 +15,32 @@ const sites = [
 const cells = [18,22,31,26,29,34,92,45,28,33,24,37,41,27,39,32,30,25,48,21];
 const smallCells = [18.7,22.4,20.2,26.1,34.6,41.2,82.1,30.8,26.5,24.1,28.7,91.8,37.9,44.8,55.7,22.0,17.8,15.6];
 
+const state = {
+  selectedSiteId: '1',
+};
+
+function getSelectedSite(){
+  return sites.find(site => site[0] === state.selectedSiteId) || sites[0];
+}
+
+function siteNo(site){
+  return `SITE-${String(Number(site[0]) + 20).padStart(4, '0')}`;
+}
+
+function bmsId(site){
+  return Number(site[0]) % 2 === 0 ? 'BMS-210531-LG001' : 'BMS-210531-KO001';
+}
+
+function siteOptions(){
+  return sites.map(site => `<option value="${site[0]}" ${site[0] === state.selectedSiteId ? 'selected' : ''}>${site[1]}</option>`).join('');
+}
+
+function selectSite(id){
+  state.selectedSiteId = String(id);
+  detailPage();
+}
+
+
 function statusClass(status){
   if(status === '정상') return 'good';
   if(status === '주의') return 'warn';
@@ -64,7 +90,7 @@ function dashboard(){
           <table>
             <thead><tr><th>순위</th><th>사이트명</th><th>지역</th><th>제조사</th><th>이상 점수</th><th>상태</th></tr></thead>
             <tbody>
-              ${sites.slice(0,6).map((s,i)=>`<tr><td><b class="rank-num" style="color:${i<2?'#e11d48':i<4?'#f59e0b':'#0969e8'}">${i+1}</b></td><td><b>${s[1]}</b></td><td>${s[2]}</td><td>${s[4]}</td><td>${score(s[6])}</td><td>${badge(s[7])}</td></tr>`).join('')}
+              ${sites.slice(0,6).map((s,i)=>`<tr class="clickable-row" onclick="selectSite('${s[0]}')"><td><b class="rank-num" style="color:${i<2?'#e11d48':i<4?'#f59e0b':'#0969e8'}">${i+1}</b></td><td><b>${s[1]}</b></td><td>${s[2]}</td><td>${s[4]}</td><td>${score(s[6])}</td><td>${badge(s[7])}</td></tr>`).join('')}
             </tbody>
           </table>
         </div>
@@ -74,9 +100,9 @@ function dashboard(){
         <section class="panel">
           <div class="panel-title"><span class="mini-icon">⚠</span>우선 점검 필요 사이트 요약</div>
           <div class="priority-list">
-            <div class="priority-item"><div class="rank-circle">1</div><div class="priority-name">영광 ESS 2호기</div><div class="priority-reason red">이상 점수 매우 높음 (93.7)</div><div class="chev">›</div></div>
-            <div class="priority-item"><div class="rank-circle r2">2</div><div class="priority-name">평택 ESS 1호기</div><div class="priority-reason orange">이상 점수 높음 (87.2)</div><div class="chev">›</div></div>
-            <div class="priority-item"><div class="rank-circle r3">3</div><div><div class="priority-name">군산 ESS 3호기</div><small>리스크 확산 가능, 모듈 8개</small></div><div class="priority-reason orange">이상 점수 상승 추세 (↑)</div><div class="chev">›</div></div>
+            <div class="priority-item clickable-row" onclick="selectSite('1')"><div class="rank-circle">1</div><div class="priority-name">영광 ESS 2호기</div><div class="priority-reason red">이상 점수 매우 높음 (93.7)</div><div class="chev">›</div></div>
+            <div class="priority-item clickable-row" onclick="selectSite('2')"><div class="rank-circle r2">2</div><div class="priority-name">평택 ESS 1호기</div><div class="priority-reason orange">이상 점수 높음 (87.2)</div><div class="chev">›</div></div>
+            <div class="priority-item clickable-row" onclick="selectSite('3')"><div class="rank-circle r3">3</div><div><div class="priority-name">군산 ESS 3호기</div><small>리스크 확산 가능, 모듈 8개</small></div><div class="priority-reason orange">이상 점수 상승 추세 (↑)</div><div class="chev">›</div></div>
           </div>
         </section>
         <section class="panel">
@@ -104,8 +130,8 @@ function sitesPage(){
       </div>
       <div class="tabs"><button class="tab active">모두</button><button class="tab">제조사별</button><button class="tab">지역별</button><button class="tab">설치 구역별</button><button class="tab">진단 상태별</button></div>
       <div class="table-card">
-        <table class="data-table"><thead><tr><th>번호</th><th>사이트명</th><th>지역</th><th>설치 구역</th><th>제조사</th><th>설치일</th><th>AI 진단 가능</th><th>최신 이상 점수</th><th>상태</th><th>최근 분석일</th></tr></thead><tbody>
-          ${sites.map((s)=>`<tr><td>${s[0]}</td><td><b>${s[1]}</b></td><td>${s[2]}</td><td>${s[3]}</td><td>${s[4]}</td><td>${s[5]}</td><td>${Number(s[0])<7?'<span class="check">✓</span>':'<span class="dash">−</span>'}</td><td>${score(s[6])}</td><td>${badge(s[7])}</td><td>${s[8]}</td></tr>`).join('')}
+        <table class="data-table"><thead><tr><th>번호</th><th>사이트명</th><th>지역</th><th>설치 구역</th><th>제조사</th><th>설치일</th><th>AI 진단 가능</th><th>최신 이상 점수</th><th>상태</th><th>최근 분석일</th><th>상세</th></tr></thead><tbody>
+          ${sites.map((s)=>`<tr class="clickable-row" onclick="selectSite('${s[0]}')"><td>${s[0]}</td><td><b>${s[1]}</b></td><td>${s[2]}</td><td>${s[3]}</td><td>${s[4]}</td><td>${s[5]}</td><td>${Number(s[0])<7?'<span class="check">✓</span>':'<span class="dash">−</span>'}</td><td>${score(s[6])}</td><td>${badge(s[7])}</td><td>${s[8]}</td><td><button class="table-action" onclick="event.stopPropagation(); selectSite('${s[0]}')">상세 보기</button></td></tr>`).join('')}
         </tbody></table>
         <div class="pagination"><b>총 128개 중 24개 표시</b><div class="pages"><button class="page-btn">«</button><button class="page-btn">‹</button><button class="page-btn active">1</button><button class="page-btn">2</button><button class="page-btn">3</button><button class="page-btn">›</button><button class="page-btn">»</button></div><div class="select" style="height:40px">24개 / 페이지 <span>⌄</span></div></div>
       </div>
@@ -120,14 +146,17 @@ function sitesPage(){
 
 function detailPage(){
   setActive('detail');
+  const selected = getSelectedSite();
+  const selectedSiteNo = siteNo(selected);
+  const selectedBmsId = bmsId(selected);
   content.innerHTML = `
   <div class="page detail-page">
     <section class="detail-left">
-      <div class="breadcrumb">사이트 상세 <span>›</span> Site A <span>›</span> Bank 01 <span>›</span> Rack 03 <span>›</span> String 02 <span>›</span> Module 05</div>
-      <div class="detail-title"><div class="site-icon">▦</div><h1>Site A <span>›</span> Bank 01 <span>›</span> Rack 03 <span>›</span> String 02 <span>›</span> Module 05 <em class="level-tag">Module 레벨</em></h1></div>
+      <div class="breadcrumb">사이트 목록 <span>›</span> ${selected[1]} <span>›</span> Bank 01 <span>›</span> Rack 03 <span>›</span> String 02 <span>›</span> Module 05</div>
+      <div class="detail-title detail-title-row"><div class="site-icon">▦</div><div><h1>${selected[1]} <span>›</span> Bank 01 <span>›</span> Rack 03 <span>›</span> String 02 <span>›</span> Module 05 <em class="level-tag">Module 레벨</em></h1><p class="site-subline">${selected[2]} · ${selected[4]} · ${selectedSiteNo}</p></div><label class="site-picker"><span>사이트 선택</span><select onchange="selectSite(this.value)">${siteOptions()}</select></label></div>
       <div class="level-buttons"><button>BANK</button><button>RACK</button><button>STRING</button><button class="active">MODULE</button></div>
       <div class="module-grid">
-        <div class="info-card"><div class="card-title"><span class="mini-icon">ⓘ</span>Module 기본 정보</div><div class="module-graphic">▥</div><dl><dt>사이트</dt><dd>Site A</dd><dt>뱅크</dt><dd>Bank 01</dd><dt>랙</dt><dd>Rack 03</dd><dt>스트링</dt><dd>String 02</dd><dt>모듈</dt><dd>Module 05</dd><dt>제조사 / 모델</dt><dd>LG Energy Solution / RESU 17H</dd><dt>정격 용량</dt><dd>17.0 kWh</dd><dt>설치 일자</dt><dd>2024.04.12</dd><dt>보증 만료</dt><dd>2034.04.11</dd></dl></div>
+        <div class="info-card"><div class="card-title"><span class="mini-icon">ⓘ</span>Module 기본 정보</div><div class="module-graphic">▥</div><dl><dt>사이트</dt><dd>${selected[1]}</dd><dt>뱅크</dt><dd>Bank 01</dd><dt>랙</dt><dd>Rack 03</dd><dt>스트링</dt><dd>String 02</dd><dt>모듈</dt><dd>Module 05</dd><dt>제조사 / 모델</dt><dd>${selected[4]} / ESS-MODULE</dd><dt>정격 용량</dt><dd>17.0 kWh</dd><dt>설치 일자</dt><dd>2024.04.12</dd><dt>보증 만료</dt><dd>2034.04.11</dd></dl></div>
         <div class="warn-card"><div class="card-title"><span class="mini-icon">⌁</span>진단 상태</div><div class="alert-symbol">⚠</div><h2>주의</h2><p>위험 Cell 3개가 감지되었습니다.<br>조치가 필요한 상태입니다.</p></div>
         <div class="small-card"><div class="card-title"><span class="mini-icon">↗</span>최대 이상 점수</div><div class="metric-value orange">92 <span>/ 100</span></div><p>발생 위치: Cell 07</p></div>
         <div class="small-card"><div class="card-title"><span class="mini-icon">◷</span>최근 분석 시각</div><div class="metric-value" style="font-size:28px">2025.05.21&nbsp; 09:15:23</div><p>분석 주기: 15분 &nbsp; ⟳</p></div>
@@ -186,4 +215,5 @@ navItems.forEach(item=>item.addEventListener('click',()=>{
 }));
 window.sitesPage = sitesPage;
 window.detailPage = detailPage;
+window.selectSite = selectSite;
 dashboard();
