@@ -1,35 +1,24 @@
-"""KESCO AI Monitoring Web API router.
-
-라우터는 요청/응답과 검증만 담당한다.
-실제 데이터 구성은 service.monitor_service 쪽으로 분리했다.
-"""
+"""KESCO AI Monitoring Web API router."""
 
 from typing import Literal, Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Query
 
-from service import monitor_service
+from service.monitor_service import MonitorService
 
 
 router = APIRouter(prefix="/api/v1/monitor", tags=["Monitor"])
-
-
-def _success(result):
-    return {"status": "success", "result": result}
-
-
-def _not_found(site_id: str):
-    raise HTTPException(status_code=404, detail=f"Monitor site not found. site_id={site_id}")
+monitor_service = MonitorService()
 
 
 @router.get("/system-status", summary="Get Monitor System Status")
 async def get_system_status():
-    return _success(monitor_service.get_system_status())
+    return await monitor_service.get_system_status()
 
 
 @router.get("/dashboard/summary", summary="Get Monitor Dashboard Summary")
 async def get_dashboard_summary():
-    return _success(monitor_service.get_dashboard_summary())
+    return await monitor_service.get_dashboard_summary()
 
 
 @router.get("/sites", summary="Get Monitor Site List")
@@ -44,7 +33,7 @@ async def get_sites(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=24, ge=1, le=100),
 ):
-    result = monitor_service.get_sites(
+    return await monitor_service.get_sites(
         keyword=keyword,
         manufacturer=manufacturer,
         region=region,
@@ -55,30 +44,16 @@ async def get_sites(
         page=page,
         page_size=page_size,
     )
-    return {
-        "status": "success",
-        "page": result["page"],
-        "page_size": result["page_size"],
-        "total_count": result["total_count"],
-        "items": result["items"],
-        "filters": result["filters"],
-    }
 
 
 @router.get("/sites/{site_id}", summary="Get Monitor Site Detail")
 async def get_site_detail(site_id: str):
-    result = monitor_service.get_site_detail(site_id)
-    if result is None:
-        _not_found(site_id)
-    return _success(result)
+    return await monitor_service.get_site_detail(site_id)
 
 
 @router.get("/sites/{site_id}/tree", summary="Get Monitor Site Hierarchy Tree")
 async def get_site_tree(site_id: str):
-    result = monitor_service.get_site_tree(site_id)
-    if result is None:
-        _not_found(site_id)
-    return _success(result)
+    return await monitor_service.get_site_tree(site_id)
 
 
 @router.get("/sites/{site_id}/level", summary="Get Monitor Site Level Detail")
@@ -91,7 +66,7 @@ async def get_level_detail(
     module_id: Optional[str] = Query(default="MODULE-05"),
     target_date: Optional[str] = Query(default=None),
 ):
-    result = monitor_service.get_level_detail(
+    return await monitor_service.get_level_detail(
         site_id=site_id,
         level=level,
         bank_id=bank_id,
@@ -100,9 +75,6 @@ async def get_level_detail(
         module_id=module_id,
         target_date=target_date,
     )
-    if result is None:
-        _not_found(site_id)
-    return _success(result)
 
 
 @router.get("/sites/{site_id}/trend", summary="Get Monitor Trend")
@@ -116,7 +88,7 @@ async def get_trend(
     cell_no: Optional[int] = None,
     days: int = Query(default=7, ge=1, le=30),
 ):
-    result = monitor_service.get_trend(
+    return await monitor_service.get_trend(
         site_id=site_id,
         level=level,
         bank_id=bank_id,
@@ -126,9 +98,6 @@ async def get_trend(
         cell_no=cell_no,
         days=days,
     )
-    if result is None:
-        _not_found(site_id)
-    return _success(result)
 
 
 @router.get("/recommendations", summary="Get Monitor Recommendations")
@@ -141,14 +110,24 @@ async def get_recommendations(
     module_id: Optional[str] = None,
     cell_no: Optional[int] = None,
 ):
-    return _success(
-        monitor_service.get_recommendations(
-            target_level=target_level,
-            site_id=site_id,
-            bank_id=bank_id,
-            rack_id=rack_id,
-            string_id=string_id,
-            module_id=module_id,
-            cell_no=cell_no,
-        )
+    return await monitor_service.get_recommendations(
+        target_level=target_level,
+        site_id=site_id,
+        bank_id=bank_id,
+        rack_id=rack_id,
+        string_id=string_id,
+        module_id=module_id,
+        cell_no=cell_no,
     )
+
+
+@router.get("/db-summary", summary="Get Monitor Local DB Summary")
+async def get_db_summary():
+    """로컬 DB 연결 상태와 anomaly_score/pipeline_run_log 테이블 요약을 확인한다."""
+    return await monitor_service.get_db_summary()
+
+
+@router.get("/db-recent-scores", summary="Get Recent Anomaly Score Rows")
+async def get_recent_anomaly_scores(limit: int = Query(default=20, ge=1, le=100)):
+    """anomaly_score 최근 행을 스키마 유연하게 조회한다."""
+    return await monitor_service.get_recent_anomaly_scores(limit=limit)
