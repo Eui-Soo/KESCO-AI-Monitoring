@@ -354,47 +354,6 @@ def _make_monitor_site_id(site_no: int, bms_id: Any) -> str:
 def _legacy_monitor_site_id(site_no: int) -> str:
     return f"SITE-{int(site_no):04d}"
 
-
-def _demo_site_meta(site_no: int, bms_id: str) -> dict[str, str]:
-    manufacturers = [
-        "Samsung SDI",
-        "LG Energy Solution",
-        "SK On",
-        "CATL",
-    ]
-    regions = [
-        "Daejeon",
-        "Sejong",
-        "Chungnam",
-        "Gyeonggi",
-        "Jeonbuk",
-        "Jeonnam",
-    ]
-    install_areas = [
-        "Central Area",
-        "North Area",
-        "South Area",
-        "West Area",
-        "East Area",
-    ]
-
-    seed = abs(hash(f"{site_no}:{bms_id}"))
-    return {
-        "manufacturer": manufacturers[seed % len(manufacturers)],
-        "region": regions[(seed // 7) % len(regions)],
-        "install_area": install_areas[(seed // 13) % len(install_areas)],
-    }
-
-
-def _format_display_datetime(value: Any) -> Any:
-    if value is None:
-        return None
-    text = str(value).replace("T", " ")
-    if "." in text:
-        text = text.split(".", 1)[0]
-    return text[:19]
-
-
 def _find_site(site_id: str) -> dict[str, Any]:
     for site in SITES:
         if site["site_id"] == site_id or str(site["site_no"]) == str(site_id):
@@ -455,31 +414,25 @@ def _status_from_score(score: Optional[float]) -> tuple[str, str]:
     return "normal", "Normal"
 
 
-
 def _site_from_db_row(row: dict[str, Any]) -> dict[str, Any]:
     site_no = int(row.get("site_no") or 0)
     bms_id = row.get("bms_id") or "-"
     score = _normalize_score(row.get("latest_score"))
     avg_score = _normalize_score(row.get("average_score"))
     status, status_text = _status_from_score(score)
-
     rack_count = int(row.get("rack_count") or 0)
     string_count = int(row.get("string_count") or 0)
     module_count = int(row.get("module_count") or 0)
     bank_count = int(row.get("bank_count") or 0)
 
-    meta = _demo_site_meta(site_no, str(bms_id))
-    safe_bms_id = str(bms_id).strip().replace(" ", "_").replace("/", "_").replace("\\", "_")
-    legacy_site_id = f"SITE-{site_no:04d}"
-
     return {
-        "site_id": f"{legacy_site_id}__BMS-{safe_bms_id}",
-        "legacy_site_id": legacy_site_id,
+        "site_id": _make_monitor_site_id(site_no, bms_id),
+        "legacy_site_id": _legacy_monitor_site_id(site_no),
         "site_no": site_no,
         "site_name": f"ESS Site {site_no}",
-        "region": meta["region"],
-        "install_area": meta["install_area"],
-        "manufacturer": meta["manufacturer"],
+        "region": "Local DB",
+        "install_area": "-",
+        "manufacturer": "-",
         "installed_at": str(row.get("target_date") or "-"),
         "bms_id": bms_id,
         "ess_capacity": "-",
@@ -493,8 +446,8 @@ def _site_from_db_row(row: dict[str, Any]) -> dict[str, Any]:
         "average_score": avg_score,
         "status": status,
         "status_text": status_text,
-        "last_data_time": _format_display_datetime(row.get("last_data_time")),
-        "last_analysis_time": _format_display_datetime(row.get("last_analysis_time")),
+        "last_data_time": row.get("last_data_time"),
+        "last_analysis_time": row.get("last_analysis_time"),
         "data_status": "normal",
         "risk_location": "Latest anomaly_score result",
         "selected_rack_no": 1,
@@ -503,6 +456,7 @@ def _site_from_db_row(row: dict[str, Any]) -> dict[str, Any]:
         "score_row_count": int(row.get("score_row_count") or 0),
         "data_source": "local-db",
     }
+
 
 def _status_counts_from_sites(sites: list[dict[str, Any]]) -> dict[str, int]:
     return {"normal_site_count": sum(1 for site in sites if site.get("status") == "normal"), "warning_site_count": sum(1 for site in sites if site.get("status") == "warning"), "abnormal_site_count": sum(1 for site in sites if site.get("status") == "abnormal"), "unavailable_site_count": sum(1 for site in sites if site.get("status") == "unavailable"), "data_missing_site_count": sum(1 for site in sites if site.get("status") == "data_missing")}

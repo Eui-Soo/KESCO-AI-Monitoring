@@ -4,11 +4,8 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>KESCO AI Monitoring</title>
-  <link rel="stylesheet" href="/static/monitor/monitor.css?v=26" />
-  <link rel="stylesheet" href="/static/monitor/monitor_v7_fix.css?v=26" />
-  <link rel="stylesheet" href="/static/monitor/monitor_tree_v19.css" />
-  <link rel="stylesheet" href="/static/monitor/monitor_v17_ui_fix.css" />
-  <link rel="stylesheet" href="/static/monitor/monitor_v28_stable.css?v=28">
+  <link rel="stylesheet" href="/static/monitor/monitor.css" />
+  <link rel="stylesheet" href="/static/monitor/monitor_v7_fix.css" />
 </head>
 <body>
   <div id="app" class="app-shell">
@@ -24,15 +21,6 @@
         <button class="nav-item" data-page="history"><span class="nav-icon">↺</span><span>실행 이력</span></button>
         <button class="nav-item" data-page="settings"><span class="nav-icon">⚙</span><span>설정</span></button>
       </nav>
-
-      <section id="sidebarHierarchyTree" class="sidebar-tree-card" aria-label="ESS hierarchy tree">
-        <div class="sidebar-tree-title">
-          <span>▦</span>
-          <b>계층 구조 탐색</b>
-          <button type="button" class="sidebar-tree-refresh" onclick="renderSidebarHierarchyTree && renderSidebarHierarchyTree()">↻</button>
-        </div>
-        <div class="sidebar-tree-empty">사이트 데이터를 불러오는 중입니다.</div>
-      </section>
       <div class="ess-illustration" aria-hidden="true">
         <div class="wind w1"></div><div class="wind w2"></div>
         <div class="ess-box"><div></div><div></div><div></div><span>⚡</span></div>
@@ -66,7 +54,6 @@
       </footer>
     </main>
   </div>
-  <script src="/static/monitor/monitor.js?v=28"></script>
-  <script src="/static/monitor/monitor_tree_v19.js"></script>
+  <script src="/static/monitor/monitor.js"></script>
 </body>
 </html>

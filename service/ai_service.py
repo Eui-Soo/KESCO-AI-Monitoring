@@ -1,66 +1,134 @@
-"""AI 처리 서비스.
+"""Development AI bypass service.
 
-schedule_service.py에서 넘겨준 rolling 7일 전처리 데이터를
-ai/ai_process.py의 ai_process() 함수로 전달한다.
-
-실제 STGCN 모델 로딩은 서버 시작 시점이 아니라,
-AI 실행 시점에 ai_process.py 내부에서 수행된다.
+This file intentionally does not import TensorFlow.
+It creates deterministic demo anomaly scores from preprocessed data.
+Use this only on development PC.
 """
 
-import asyncio
 import logging
-from typing import List
+from datetime import datetime
+from typing import Dict, List, Tuple
 
 
 logger = logging.getLogger("app")
 
 
 class AIProcessingService:
-    """AI 추론 서비스."""
+    """AI inference bypass service for development PC."""
 
     def __init__(self):
-        logger.info("✅ AIProcessingService 초기화 완료")
+        logger.info("AIProcessingService initialized in DEV BYPASS mode")
 
     async def run(self, data: List[dict]) -> List[dict]:
-        """AI 추론을 비동기로 실행한다."""
-
         input_count = len(data or [])
 
         if input_count == 0:
-            logger.warning("AI 처리 생략: 입력 데이터가 없습니다.")
+            logger.warning("DEV BYPASS AI skipped: empty input")
             return []
 
-        logger.info(f"▶ AI 처리 시작: input_count={input_count}")
-
-        loop = asyncio.get_running_loop()
-        results = await loop.run_in_executor(
-            None,
-            self._run_ai_process,
-            data,
+        logger.warning(
+            "DEV BYPASS AI enabled - TensorFlow inference is skipped. "
+            f"input_count={input_count}"
         )
 
-        if results is None:
-            results = []
-
-        logger.info(f"✅ AI 처리 완료: output_count={len(results)}")
-        return results
+        return self._make_demo_scores(data)
 
     async def process(self, data: List[dict]) -> List[dict]:
-        """기존 코드 호환용 함수."""
         return await self.run(data)
 
+    def _make_demo_scores(self, data: List[dict]) -> List[dict]:
+        groups: Dict[Tuple, dict] = {}
+
+        for row in data:
+            site_no = row.get("site_no", 0)
+            bms_id = row.get("bms_id", "")
+            bank_no = row.get("bank_no", row.get("bank_number", 1))
+            rack_no = row.get("rack_no", row.get("rack_number", 0))
+            string_no = row.get("string_no", row.get("string_number", 0))
+            module_no = row.get("module_no", row.get("module_number", 0))
+
+            key = (site_no, bms_id, bank_no, rack_no, string_no, module_no)
+
+            if key not in groups:
+                groups[key] = row
+
+        results: List[dict] = []
+        prediction_time = datetime.now()
+
+        for idx, (key, sample) in enumerate(sorted(groups.items(), key=lambda x: x[0])):
+            site_no, bms_id, bank_no, rack_no, string_no, module_no = key
+
+            # Deterministic demo score. No random, no TensorFlow.
+            base_score = 18.0 + ((idx * 7) % 55)
+
+            cell_scores = {}
+            cell_levels = {}
+
+            max_score = 0.0
+            total_score = 0.0
+            max_level = "normal"
+
+            for cell_no in range(1, 21):
+                score = min(99.0, base_score + (cell_no % 5) * 2.5)
+                level = self._score_to_level(score)
+
+                cell_scores[f"cell_{cell_no}_score"] = round(score, 3)
+                cell_levels[f"cell_{cell_no}_level"] = level
+
+                max_score = max(max_score, score)
+                total_score += score
+
+                if self._level_rank(level) > self._level_rank(max_level):
+                    max_level = level
+
+            row = {
+                "serial_number": (
+                    sample.get("serial_number")
+                    or sample.get("serial_no")
+                    or sample.get("bms_id")
+                    or bms_id
+                ),
+                "sensing_datetime": (
+                    sample.get("sensing_datetime")
+                    or sample.get("measured_at")
+                    or sample.get("date_time")
+                    or prediction_time
+                ),
+                "prediction_time": prediction_time,
+                "bank_no": bank_no,
+                "rack_no": rack_no,
+                "string_no": string_no,
+                "module_no": module_no,
+                "max_score": round(max_score, 3),
+                "max_level": max_level,
+                "average_score": round(total_score / 20.0, 3),
+                "maker": "dev-bypass",
+            }
+
+            row.update(cell_scores)
+            row.update(cell_levels)
+
+            results.append(row)
+
+        logger.warning(f"DEV BYPASS AI completed: output_count={len(results)}")
+        return results
+
     @staticmethod
-    def _run_ai_process(data: List[dict]) -> List[dict]:
-        """실제 ai_process.py의 ai_process()를 호출한다.
+    def _score_to_level(score: float) -> str:
+        if score >= 80:
+            return "danger"
+        if score >= 60:
+            return "warning"
+        return "normal"
 
-        여기서 import하는 이유:
-        - 서버 시작 시 TensorFlow를 바로 로딩하지 않기 위해서
-        - 실제 AI 실행 시점에만 모델 관련 코드를 불러오기 위해서
-        """
-        from ai.ai_process import ai_process
+    @staticmethod
+    def _level_rank(level: str) -> int:
+        ranks = {
+            "normal": 0,
+            "warning": 1,
+            "danger": 2,
+        }
+        return ranks.get(str(level).lower(), 0)
 
-        return ai_process(data)
 
-
-# 기존 코드 호환용 별칭
 AIService = AIProcessingService

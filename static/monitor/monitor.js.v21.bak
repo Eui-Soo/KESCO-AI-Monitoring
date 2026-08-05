@@ -1,0 +1,671 @@
+/* KESCO Monitor UI - v8 safe API integration
+ * 목표: API 연동은 유지하되, 어떤 API/렌더링 오류가 나도 화면이 멈추지 않게 한다.
+ */
+
+const content = document.getElementById('content');
+const navItems = document.querySelectorAll('.nav-item');
+const topbarTitle = document.getElementById('topbarTitle');
+
+const API = {
+  system: '/api/v1/monitor/system-status',
+  dashboard: '/api/v1/monitor/dashboard/summary',
+  sites: '/api/v1/monitor/sites',
+  site: (id) => `/api/v1/monitor/sites/${encodeURIComponent(id)}`,
+  level: (id, level = 'module') => `/api/v1/monitor/sites/${encodeURIComponent(id)}/level?level=${encodeURIComponent(level)}`,
+  trend: (id) => `/api/v1/monitor/sites/${encodeURIComponent(id)}/trend?level=module`,
+  recommendations: (id) => `/api/v1/monitor/recommendations?site_id=${encodeURIComponent(id || 'SITE-0021')}`,
+};
+
+const fallbackSites = [
+  { site_id:'SITE-0021', site_no:21, site_name:'영광 ESS 2호기', region:'전라남도 영광군', install_area:'전력남서부', manufacturer:'삼성SDI', installed_at:'2024-11-15', latest_score:93.7, status:'abnormal', status_text:'비정상', last_analysis_time:'2025-05-19 10:20:15', risk_location:'Bank 01 > Rack 03 > String 02 > Module 05 > Cell 07' },
+  { site_id:'SITE-0022', site_no:22, site_name:'평택 ESS 1호기', region:'경기도 평택시', install_area:'경기남부', manufacturer:'LG에너지솔루션', installed_at:'2024-08-21', latest_score:87.2, status:'abnormal', status_text:'비정상', last_analysis_time:'2025-05-19 10:15:12', risk_location:'Bank 01 > Rack 01 > String 04 > Module 02 > Cell 12' },
+  { site_id:'SITE-0023', site_no:23, site_name:'군산 ESS 3호기', region:'전라북도 군산시', install_area:'전력동부', manufacturer:'삼성SDI', installed_at:'2024-09-30', latest_score:72.4, status:'warning', status_text:'주의', last_analysis_time:'2025-05-19 10:18:09', risk_location:'Bank 01 > Rack 02 > String 01 > Module 08' },
+  { site_id:'SITE-0024', site_no:24, site_name:'김해 ESS 1호기', region:'경상남도 김해시', install_area:'경남서부', manufacturer:'LG에너지솔루션', installed_at:'2024-07-10', latest_score:68.1, status:'warning', status_text:'주의', last_analysis_time:'2025-05-19 10:10:23', risk_location:'Bank 01 > Rack 04 > String 03' },
+  { site_id:'SITE-0025', site_no:25, site_name:'제주 ESS 2호기', region:'제주특별자치도 제주시', install_area:'제주권', manufacturer:'CATL', installed_at:'2024-12-05', latest_score:34.6, status:'normal', status_text:'정상', last_analysis_time:'2025-05-19 10:05:08', risk_location:'-' },
+  { site_id:'SITE-0026', site_no:26, site_name:'울산 ESS 1호기', region:'울산광역시 울주군', install_area:'영남동부', manufacturer:'LG에너지솔루션', installed_at:'2024-10-22', latest_score:null, status:'unavailable', status_text:'진단 불가', last_analysis_time:null, risk_location:'-' },
+];
+
+const state = {
+  page: 'dashboard',
+  sites: fallbackSites,
+  selectedSiteId: 'SITE-0021',
+  dashboard: null,
+  level: 'module',
+};
+
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>'"]/g, (ch) => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[ch]));
+}
+
+function setLoading(title = '로딩 중') {
+  if (!content) return;
+  content.innerHTML = `<div class="page"><section class="panel" style="min-height:360px;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:14px"><div style="font-size:38px">⏳</div><h2>${escapeHtml(title)}</h2><p style="color:#738399;margin:0">AI 모니터링 데이터를 불러오는 중입니다.</p></section></div>`;
+}
+
+function showError(message, detail = '') {
+  if (!content) return;
+  content.innerHTML = `<div class="page"><section class="panel" style="border-color:#fecaca;background:#fffafa"><div class="panel-title"><span class="mini-icon">⚠</span>화면 렌더링 오류</div><p style="font-weight:800;color:#b91c1c">${escapeHtml(message)}</p><pre style="white-space:pre-wrap;background:#fff;border:1px solid #fecaca;border-radius:12px;padding:14px;color:#7f1d1d;max-height:220px;overflow:auto">${escapeHtml(detail)}</pre><button class="table-action" onclick="location.reload()">새로고침</button></section></div>`;
+}
+
+async function fetchJson(url, fallback = null) {
+  try {
+    const res = await fetch(url, { headers: { Accept: 'application/json' }, cache: 'no-store' });
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText} - ${url}`);
+    return await res.json();
+  } catch (error) {
+    console.warn('[monitor] API fallback:', url, error);
+    return fallback;
+  }
+}
+
+function normalizeSites(data) {
+  if (Array.isArray(data)) return data;
+  if (Array.isArray(data?.items)) return data.items;
+  if (Array.isArray(data?.result?.items)) return data.result.items;
+  if (Array.isArray(data?.result)) return data.result;
+  return fallbackSites;
+}
+
+function setActive(page) {
+  state.page = page;
+  if (topbarTitle) topbarTitle.textContent = page === 'dashboard' ? '대시보드' : page === 'sites' ? '사이트 목록' : page === 'detail' ? '사이트 상세' : page === 'history' ? '실행 이력' : '설정';
+  navItems.forEach((item) => item.classList.toggle('active', item.dataset.page === page));
+}
+
+function statusText(siteOrStatus) {
+  if (typeof siteOrStatus === 'string') {
+    if (siteOrStatus === 'abnormal') return '비정상';
+    if (siteOrStatus === 'warning') return '주의';
+    if (siteOrStatus === 'normal') return '정상';
+    if (siteOrStatus === 'unavailable') return '진단 불가';
+    if (siteOrStatus === 'data_missing') return '데이터 없음';
+    return siteOrStatus;
+  }
+  return siteOrStatus?.status_text || statusText(siteOrStatus?.status || 'normal');
+}
+
+function statusClassByText(text) {
+  const value = statusText(text);
+  if (value === '정상') return 'good';
+  if (value === '주의') return 'warn';
+  if (value === '비정상' || value === '위험') return 'bad';
+  return 'gray';
+}
+
+function badge(siteOrStatus) {
+  const text = statusText(siteOrStatus);
+  return `<span class="state-badge ${statusClassByText(text)}">${escapeHtml(text)}</span>`;
+}
+
+function scoreClass(value) {
+  const n = Number(value);
+  if (Number.isNaN(n)) return 'gray';
+  if (n >= 71) return 'bad';
+  if (n >= 40) return 'warn';
+  return 'good';
+}
+
+function score(value) {
+  const display = value === null || value === undefined ? '-' : value;
+  return `<span class="score-badge ${scoreClass(display)}">${escapeHtml(display)}</span>`;
+}
+
+function currentSite() {
+  return state.sites.find((s) => String(s.site_id) === String(state.selectedSiteId)) || state.sites[0] || fallbackSites[0];
+}
+
+function siteOptions() {
+  return state.sites.map((s) => {
+    const label = `${s.site_name || s.site_id} / ${s.bms_id || '-'}`;
+    return `<option value="${escapeHtml(s.site_id)}" ${String(s.site_id) === String(state.selectedSiteId) ? 'selected' : ''}>${escapeHtml(label)}</option>`;
+  }).join('');
+}
+
+function selectSite(siteId) {
+  state.selectedSiteId = siteId;
+  renderDetail();
+}
+window.selectSite = selectSite;
+
+function nav(page) {
+  if (page === 'dashboard') return renderDashboard();
+  if (page === 'sites') return renderSites();
+  if (page === 'detail') return renderDetail();
+  if (page === 'history') return renderPlaceholder('실행 이력', '파이프라인 실행 이력 화면은 다음 단계에서 연결합니다.');
+  if (page === 'settings') return renderPlaceholder('설정', '알림, 모델, 사용자 설정 화면은 다음 단계에서 연결합니다.');
+}
+window.nav = nav;
+
+function renderPlaceholder(title, desc) {
+  setActive(title === '실행 이력' ? 'history' : 'settings');
+  content.innerHTML = `<div class="page"><section class="panel"><div class="panel-title"><span class="mini-icon">▣</span>${escapeHtml(title)}</div><p style="color:#738399;font-weight:700">${escapeHtml(desc)}</p></section></div>`;
+}
+
+async function loadCommonData() {
+  const sitesData = await fetchJson(API.sites, { items: fallbackSites });
+  state.sites = normalizeSites(sitesData);
+  if (!state.sites.some((s) => String(s.site_id) === String(state.selectedSiteId))) {
+    state.selectedSiteId = state.sites[0]?.site_id || 'SITE-0021';
+  }
+}
+
+async function renderDashboard() {
+  try {
+    setActive('dashboard');
+    setLoading('대시보드 로딩 중');
+    await loadCommonData();
+    const dashboardData = await fetchJson(API.dashboard, null);
+    const result = dashboardData?.result || {};
+    const summary = result.summary || {};
+    const ranking = Array.isArray(result.risk_ranking) ? result.risk_ranking : state.sites.filter((s) => s.latest_score !== null && s.latest_score !== undefined).slice().sort((a,b) => Number(b.latest_score || 0) - Number(a.latest_score || 0)).slice(0, 6);
+    const priority = Array.isArray(result.priority_sites) ? result.priority_sites : ranking.slice(0, 3).map((s, i) => ({ priority_rank:i+1, site_id:s.site_id, site_name:s.site_name, reason:'이상 점수 우선 점검', score:s.latest_score, recommend_action:s.risk_location || '상세 점검 필요' }));
+
+    content.innerHTML = `
+    <div class="page">
+      <div class="dashboard-grid">
+        <div class="hero-card"><div class="hero-left"><div class="hero-icon">▦</div><div><div class="hero-title">설치 사이트 수</div><div class="hero-value">${escapeHtml(summary.total_site_count ?? 128)}</div></div></div><div class="korea-map"></div></div>
+        <div class="hero-card"><div class="hero-left"><div class="hero-icon" style="background:linear-gradient(135deg,#e8fff7,#d9fbef); color:#008b83">♙</div><div><div class="hero-title">AI 진단 가능 사이트 수</div><div class="hero-value green">${escapeHtml(summary.ai_available_site_count ?? 96)}</div></div></div><div class="ai-chip-art"></div></div>
+        <div class="stat-split hero-card"><h3>정상 / 주의 / 비정상</h3><div class="split-row"><div class="split-box"><div class="split-label green">정상</div><div class="split-num green">${escapeHtml(summary.normal_site_count ?? 72)}</div></div><div class="split-box"><div class="split-label orange">주의</div><div class="split-num orange">${escapeHtml(summary.warning_site_count ?? 18)}</div></div><div class="split-box"><div class="split-label red">비정상</div><div class="split-num red">${escapeHtml(summary.abnormal_site_count ?? 6)}</div></div></div></div>
+      </div>
+      <div class="dash-main">
+        <section class="panel">
+          <div class="panel-title"><span class="mini-icon">▥</span>이상 점수 순위별 사이트 리스트</div>
+          <div class="ranking-table"><table><thead><tr><th>순위</th><th>사이트명</th><th>지역</th><th>제조사</th><th>이상 점수</th><th>상태</th></tr></thead><tbody>
+            ${ranking.map((s, i) => `<tr class="clickable-row" onclick="selectSite('${escapeHtml(s.site_id)}')"><td><b class="rank-num">${escapeHtml(s.rank ?? i+1)}</b></td><td><b>${escapeHtml(s.site_name)}</b></td><td>${escapeHtml(s.region)}</td><td>${escapeHtml(s.manufacturer)}</td><td>${score(s.latest_score ?? s.score)}</td><td>${badge(s)}</td></tr>`).join('')}
+          </tbody></table></div>
+          <div class="more-link" onclick="nav('sites')">전체 사이트 보기 <span>›</span></div>
+        </section>
+        <div class="side-stack">
+          <section class="panel"><div class="panel-title"><span class="mini-icon">⚠</span>우선 점검 필요 사이트 요약</div><div class="priority-list">
+            ${priority.map((p, i) => `<div class="priority-item clickable-row" onclick="selectSite('${escapeHtml(p.site_id)}')"><div class="rank-circle ${i===1?'r2':i===2?'r3':''}">${escapeHtml(p.priority_rank ?? i+1)}</div><div><div class="priority-name">${escapeHtml(p.site_name)}</div><small>${escapeHtml(p.recommend_action || '')}</small></div><div class="priority-reason ${i<2?'red':'orange'}">${escapeHtml(p.reason)} (${escapeHtml(p.score)})</div><div class="chev">›</div></div>`).join('')}
+          </div></section>
+          <section class="panel"><div class="panel-title"><span class="mini-icon">♧</span>데이터 수집 / AI 진단 상태 알림</div><div class="alarm-list">
+            <div class="alarm-item"><div class="alarm-icon blue">▤</div><div class="alarm-name">데이터 수집 누락 사이트</div><div class="alarm-value blue">${escapeHtml(summary.data_missing_site_count ?? 3)}개 사이트</div><div class="chev">›</div></div>
+            <div class="alarm-item"><div class="alarm-icon" style="color:#7c3aed">✺</div><div class="alarm-name">AI 진단 불가 사이트</div><div class="alarm-value" style="color:#7c3aed">${escapeHtml(summary.unavailable_site_count ?? 29)}개 사이트</div><div class="chev">›</div></div>
+            <div class="alarm-item"><div class="alarm-icon red">⚠</div><div class="alarm-name">최근 분석 실패 건수</div><div class="alarm-value red">${escapeHtml(summary.recent_failed_analysis_count ?? 2)}건</div><div class="chev">›</div></div>
+          </div></section>
+        </div>
+      </div>
+    </div>`;
+  } catch (error) {
+    console.error('[monitor] renderDashboard failed', error);
+    showError('대시보드 표시 중 오류가 발생했습니다.', error.stack || error.message);
+  }
+}
+
+async function renderSites() {
+  try {
+    setActive('sites');
+    setLoading('사이트 목록 로딩 중');
+    await loadCommonData();
+    const rows = state.sites;
+    content.innerHTML = `
+    <div class="page sites-layout">
+      <section>
+        <div class="page-heading"><h1>사이트 목록</h1><p>전체 사이트 현황 및 검색</p></div>
+        <div class="filter-card"><div class="input">사이트명 검색 <span>⌕</span></div><div class="select">제조사 <span>⌄</span></div><div class="select">지역 <span>⌄</span></div><div class="select">설치 구역 <span>⌄</span></div><div class="select">진단 상태 <span>⌄</span></div></div>
+        <div class="table-card"><table class="data-table"><thead><tr><th>번호</th><th>사이트명</th><th>지역</th><th>설치 구역</th><th>제조사</th><th>설치일</th><th>최신 이상 점수</th><th>상태</th><th>최근 분석일</th><th>상세</th></tr></thead><tbody>
+          ${rows.map((s, idx) => `<tr class="clickable-row" onclick="selectSite('${escapeHtml(s.site_id)}')"><td>${escapeHtml(s.site_no ?? idx+1)}</td><td><b>${escapeHtml(s.site_name)}</b></td><td>${escapeHtml(s.region)}</td><td>${escapeHtml(s.install_area)}</td><td>${escapeHtml(s.manufacturer)}</td><td>${escapeHtml(s.installed_at)}</td><td>${score(s.latest_score)}</td><td>${badge(s)}</td><td>${escapeHtml(s.last_analysis_time || '-')}</td><td><button class="table-action" onclick="event.stopPropagation(); selectSite('${escapeHtml(s.site_id)}')">상세 보기</button></td></tr>`).join('')}
+        </tbody></table><div class="pagination"><b>총 ${escapeHtml(rows.length)}개 표시</b></div></div>
+      </section>
+      <aside><div class="summary-card"><h3>목록 요약</h3><div class="summary-grid"><div class="summary-box"><span class="mini-icon">▦</span><div><small>표시 사이트</small><div class="big">${escapeHtml(rows.length)}개</div></div></div><div class="summary-box"><span class="mini-icon">⚠</span><div><small>주의 이상</small><div class="big red">${escapeHtml(rows.filter(s => ['warning','abnormal'].includes(s.status)).length)}개</div></div></div></div></div></aside>
+    </div>`;
+  } catch (error) {
+    console.error('[monitor] renderSites failed', error);
+    showError('사이트 목록 표시 중 오류가 발생했습니다.', error.stack || error.message);
+  }
+}
+
+async function renderDetail() {
+  try {
+    setActive('detail');
+    setLoading('사이트 상세 로딩 중');
+    await loadCommonData();
+    const baseSite = currentSite();
+    const detailData = await fetchJson(API.site(baseSite.site_id), null);
+    const site = detailData?.result || baseSite;
+    const levelData = await fetchJson(API.level(site.site_id, state.level), null);
+    const level = levelData?.result || {};
+    const recData = await fetchJson(API.recommendations(site.site_id), null);
+    const recs = Array.isArray(recData?.result) ? recData.result : [];
+    const cells = Array.isArray(level.cells) ? level.cells : [18,22,31,26,29,34,92,45,28,33,24,37,41,27,39,32,30,25,48,21].map((v,i) => ({ cell_no:i+1, score:v, status:v>=80?'abnormal':v>=40?'warning':'normal', voltage:(3.62 + i/1000).toFixed(3), temperature:(30 + v/8).toFixed(1) }));
+
+    const bankNo = Number(level.bank_no || site.selected_bank_no || 1);
+    const rackNo = Number(level.rack_no || site.selected_rack_no || 1);
+    const stringNo = Number(level.string_no || site.selected_string_no || 1);
+    const moduleNo = Number(level.module_no || site.selected_module_no || 1);
+    const levelTitleMap = { bank: 'Bank 상세', rack: 'Rack 상세', string: 'String 상세', module: 'Module 상세' };
+    const levelTitle = levelTitleMap[state.level] || 'Module 상세';
+    const riskLocation = level.risk_location || site.risk_location || '-';
+    const breadcrumbText = `사이트 목록 > ${site.site_name || site.site_id} > Bank ${String(bankNo).padStart(2,'0')} > Rack ${String(rackNo).padStart(2,'0')} > String ${String(stringNo).padStart(2,'0')} > Module ${String(moduleNo).padStart(2,'0')}`;
+
+
+    content.innerHTML = `
+    <div class="page detail-page">
+      <section class="detail-left">
+        <div class="breadcrumb">${escapeHtml(breadcrumbText)}</div>
+        <div class="detail-title detail-title-row"><div class="site-icon">▦</div><div><h1>${escapeHtml(site.site_name)} <span>›</span> ${escapeHtml(levelTitle)}</h1><p>${escapeHtml(site.region)} · ${escapeHtml(site.manufacturer)} · ${escapeHtml(site.bms_id || '')}</p></div><select class="site-select" onchange="selectSite(this.value)">${siteOptions()}</select></div>
+        <div class="level-tabs"><button class="level-tab ${state.level==='bank'?'active':''}" onclick="setLevel('bank')">Bank</button><button class="level-tab ${state.level==='rack'?'active':''}" onclick="setLevel('rack')">Rack</button><button class="level-tab ${state.level==='string'?'active':''}" onclick="setLevel('string')">String</button><button class="level-tab ${state.level==='module'?'active':''}" onclick="setLevel('module')">Module</button></div>
+        <div class="detail-grid-top"><div class="info-card"><small>최대 이상 점수</small><b>${score(level.max_score ?? site.latest_score)}</b></div><div class="info-card"><small>상태</small><b>${badge(level.status || site.status)}</b></div><div class="info-card"><small>최근 분석 시각</small><b>${escapeHtml(level.last_analysis_time || site.last_analysis_time || '-')}</b></div><div class="info-card"><small>위험 위치</small><b>${escapeHtml(riskLocation)}</b></div></div>
+        <section class="panel"><div class="panel-title"><span class="mini-icon">▦</span>Cell 상태 맵</div><div class="cell-map">
+          ${cells.map((c) => `<div class="cell ${c.status === 'abnormal' ? 'bad' : c.status === 'warning' ? 'warn' : 'good'}"><b>Cell ${String(c.cell_no).padStart(2,'0')}</b><span>${escapeHtml(c.score)}</span></div>`).join('')}
+        </div></section>
+        <section class="panel"><div class="panel-title"><span class="mini-icon">▥</span>위험 Cell 상세</div><div class="ranking-table"><table><thead><tr><th>Cell</th><th>점수</th><th>상태</th><th>전압</th><th>온도</th></tr></thead><tbody>
+          ${cells.slice().sort((a,b)=>Number(b.score||0)-Number(a.score||0)).slice(0,8).map((c)=>`<tr><td><b>Cell ${String(c.cell_no).padStart(2,'0')}</b></td><td>${score(c.score)}</td><td>${badge(c.status)}</td><td>${escapeHtml(c.voltage || '-')} V</td><td>${escapeHtml(c.temperature || '-')} ℃</td></tr>`).join('')}
+        </tbody></table></div></section>
+      </section>
+      <aside class="detail-right"><section class="panel"><div class="panel-title"><span class="mini-icon">⚠</span>운영 권고</div><div class="alarm-list">
+        ${(recs.length ? recs : [{title:'위험 Cell에 대한 정밀 점검 필요', message:'Cell 07에서 이상 점수가 높게 확인되었습니다.', action:'냉각 상태 및 셀 단위 전압/저항을 점검하세요.'}]).map((r)=>`<div class="alarm-item"><div class="alarm-icon red">⚠</div><div><div class="alarm-name">${escapeHtml(r.title)}</div><small>${escapeHtml(r.message || r.action || '')}</small></div></div>`).join('')}
+      </div></section></aside>
+    </div>`;
+  } catch (error) {
+    console.error('[monitor] renderDetail failed', error);
+    showError('사이트 상세 표시 중 오류가 발생했습니다.', error.stack || error.message);
+  }
+}
+
+function setLevel(level) {
+  state.level = level;
+  renderDetail();
+}
+window.setLevel = setLevel;
+
+function bindNav() {
+  navItems.forEach((item) => {
+    item.addEventListener('click', () => nav(item.dataset.page));
+  });
+}
+
+async function init() {
+  try {
+    if (!content) return;
+    bindNav();
+    await fetchJson(API.system, null);
+    await renderDashboard();
+  } catch (error) {
+    console.error('[monitor] init failed', error);
+    showError('초기화 중 오류가 발생했습니다.', error.stack || error.message);
+  }
+}
+
+document.addEventListener('DOMContentLoaded', init);
+if (document.readyState !== 'loading') init();
+
+
+// -----------------------------------------------------------------------------
+// v18 sidebar hierarchy tree
+// -----------------------------------------------------------------------------
+function _treeNumber(value, fallback = 0) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
+}
+
+function _treeStatusClass(scoreValue) {
+  const n = Number(scoreValue);
+  if (!Number.isFinite(n)) return 'normal';
+  if (n >= 71) return 'abnormal';
+  if (n >= 40) return 'warning';
+  return 'normal';
+}
+
+function _treeDot(status) {
+  const value = String(status || 'normal').toLowerCase();
+  if (value === 'abnormal' || value === 'danger') return '<span class="tree-dot abnormal"></span>';
+  if (value === 'warning' || value === 'caution') return '<span class="tree-dot warning"></span>';
+  if (value === 'offline' || value === 'unavailable') return '<span class="tree-dot offline"></span>';
+  return '<span class="tree-dot normal"></span>';
+}
+
+function _makeSidebarTreeRows(site) {
+  const rackCount = Math.max(1, Math.min(_treeNumber(site?.rack_count, 1), 8));
+  const stringCount = Math.max(1, Math.min(_treeNumber(site?.string_count, 1), 4));
+  const moduleCount = Math.max(1, Math.min(_treeNumber(site?.module_count, 1), 24));
+  const modulesPerRack = Math.max(1, Math.ceil(moduleCount / rackCount));
+  const siteStatus = site?.status || _treeStatusClass(site?.latest_score);
+
+  let html = '';
+  html += `<div class="tree-site-line" title="${escapeHtml(site?.bms_id || '')}">${_treeDot(siteStatus)}<span>${escapeHtml(site?.site_name || 'ESS Site')}</span></div>`;
+  html += `<div class="tree-meta-line">${escapeHtml(site?.bms_id || '-')} · Score ${escapeHtml(site?.latest_score ?? '-')}</div>`;
+  html += '<ul class="tree-list depth-0">';
+  html += `<li><button type="button" class="tree-node ${state.level === 'bank' ? 'active' : ''}" onclick="setLevel('bank')"><span>▦</span><b>Bank 01</b></button>`;
+  html += '<ul class="tree-list depth-1">';
+
+  for (let rack = 1; rack <= rackCount; rack += 1) {
+    const rackActive = state.level === 'rack' && rack === Number(site?.selected_rack_no || 1);
+    html += `<li><button type="button" class="tree-node ${rackActive ? 'active' : ''}" onclick="setLevel('rack')"><span>▤</span><b>Rack ${String(rack).padStart(2, '0')}</b></button>`;
+
+    // Keep the tree compact: expand the selected/first rack only.
+    const shouldExpandRack = rack === Number(site?.selected_rack_no || 1) || rack === 1;
+    if (shouldExpandRack) {
+      html += '<ul class="tree-list depth-2">';
+      const stringLimit = Math.max(1, Math.min(stringCount, 2));
+      for (let stringNo = 1; stringNo <= stringLimit; stringNo += 1) {
+        const stringActive = state.level === 'string' && stringNo === Number(site?.selected_string_no || 1);
+        html += `<li><button type="button" class="tree-node ${stringActive ? 'active' : ''}" onclick="setLevel('string')"><span>▧</span><b>String ${String(stringNo).padStart(2, '0')}</b></button>`;
+        if (stringNo === Number(site?.selected_string_no || 1) || stringNo === 1) {
+          html += '<ul class="tree-list depth-3">';
+          const startModule = (rack - 1) * modulesPerRack + 1;
+          const endModule = Math.min(moduleCount, startModule + modulesPerRack - 1);
+          for (let moduleNo = startModule; moduleNo <= endModule; moduleNo += 1) {
+            const moduleActive = state.level === 'module' && moduleNo === Number(site?.selected_module_no || 1);
+            html += `<li><button type="button" class="tree-node module ${moduleActive ? 'active' : ''}" onclick="setLevel('module')"><span>▩</span><b>Module ${String(moduleNo).padStart(2, '0')}</b></button></li>`;
+          }
+          html += '</ul>';
+        }
+        html += '</li>';
+      }
+      html += '</ul>';
+    }
+    html += '</li>';
+  }
+
+  html += '</ul></li></ul>';
+  html += '<div class="tree-legend"><span><i class="normal"></i>정상</span><span><i class="warning"></i>주의</span><span><i class="abnormal"></i>비정상</span><span><i class="offline"></i>오프라인</span></div>';
+  return html;
+}
+
+function renderSidebarHierarchyTree() {
+  const target = document.getElementById('sidebarHierarchyTree');
+  if (!target) return;
+  const site = currentSite ? currentSite() : null;
+  if (!site) {
+    target.innerHTML = '<div class="sidebar-tree-title"><span>▦</span><b>계층 구조 탐색</b></div><div class="sidebar-tree-empty">선택된 사이트가 없습니다.</div>';
+    return;
+  }
+  target.innerHTML = `
+    <div class="sidebar-tree-title">
+      <span>▦</span>
+      <b>계층 구조 탐색</b>
+      <button type="button" class="sidebar-tree-refresh" onclick="renderSidebarHierarchyTree()">↻</button>
+    </div>
+    ${_makeSidebarTreeRows(site)}
+  `;
+}
+window.renderSidebarHierarchyTree = renderSidebarHierarchyTree;
+
+try {
+  const __v18LoadCommonData = loadCommonData;
+  loadCommonData = async function(...args) {
+    const result = await __v18LoadCommonData.apply(this, args);
+    renderSidebarHierarchyTree();
+    return result;
+  };
+
+  const __v18SetLevel = window.setLevel;
+  window.setLevel = function(level) {
+    state.level = level;
+    renderSidebarHierarchyTree();
+    renderDetail();
+  };
+
+  const __v18SelectSite = window.selectSite;
+  window.selectSite = function(siteId) {
+    state.selectedSiteId = siteId;
+    renderSidebarHierarchyTree();
+    renderDetail();
+  };
+
+  document.addEventListener('DOMContentLoaded', () => {
+    setTimeout(renderSidebarHierarchyTree, 700);
+  });
+} catch (error) {
+  console.warn('[monitor] sidebar tree patch failed', error);
+}
+
+
+/* === v20 detail-only interactive sidebar tree === */
+function v20RemoveLegacySidebarTrees() {
+  const sidebar = document.querySelector('.sidebar');
+  if (!sidebar) return;
+  Array.from(sidebar.children).forEach((el) => {
+    if (el.id === 'detailTreePanel') return;
+    const text = (el.textContent || '').trim();
+    if (text.includes('계층 구조 탐색') || text.includes('Hierarchy Explorer')) {
+      el.remove();
+    }
+  });
+}
+
+function v20EnsureTreePanel() {
+  v20RemoveLegacySidebarTrees();
+  const sidebar = document.querySelector('.sidebar');
+  if (!sidebar) return null;
+  let panel = document.getElementById('detailTreePanel');
+  if (!panel) {
+    panel = document.createElement('section');
+    panel.id = 'detailTreePanel';
+    panel.className = 'detail-tree-panel-v20 hidden';
+    const navList = sidebar.querySelector('.nav-list');
+    if (navList && navList.parentNode) {
+      navList.insertAdjacentElement('afterend', panel);
+    } else {
+      sidebar.appendChild(panel);
+    }
+  }
+  return panel;
+}
+
+function v20HideTree() {
+  const panel = v20EnsureTreePanel();
+  if (panel) panel.classList.add('hidden');
+  document.body.classList.remove('detail-tree-visible-v20');
+}
+
+function v20ShowTree(site) {
+  const panel = v20EnsureTreePanel();
+  if (!panel || !site) return;
+  panel.classList.remove('hidden');
+  document.body.classList.add('detail-tree-visible-v20');
+  panel.innerHTML = v20TreeHtml(site);
+}
+
+function v20Number(value, fallback = 1) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
+}
+
+function v20Selected() {
+  if (!state.selectedBankNo) state.selectedBankNo = 1;
+  if (!state.selectedRackNo) state.selectedRackNo = 1;
+  if (!state.selectedStringNo) state.selectedStringNo = 1;
+  if (!state.selectedModuleNo) state.selectedModuleNo = 1;
+  return {
+    bank: v20Number(state.selectedBankNo, 1),
+    rack: v20Number(state.selectedRackNo, 1),
+    string: v20Number(state.selectedStringNo, 1),
+    module: v20Number(state.selectedModuleNo, 1),
+  };
+}
+
+function v20SetPath(level, bankNo = 1, rackNo = 1, stringNo = 1, moduleNo = 1) {
+  state.level = level || 'module';
+  state.selectedBankNo = v20Number(bankNo, 1);
+  state.selectedRackNo = v20Number(rackNo, 1);
+  state.selectedStringNo = v20Number(stringNo, 1);
+  state.selectedModuleNo = v20Number(moduleNo, 1);
+  renderDetail();
+}
+window.v20SetPath = v20SetPath;
+
+function v20DistributeModules(site, rackNo) {
+  const rackCount = v20Number(site.rack_count, 1);
+  const moduleCount = v20Number(site.module_count, 1);
+  const modulesPerRack = Math.max(1, Math.ceil(moduleCount / rackCount));
+  const start = ((rackNo - 1) * modulesPerRack) + 1;
+  const end = Math.min(moduleCount, rackNo * modulesPerRack);
+  const modules = [];
+  for (let m = start; m <= end; m += 1) modules.push(m);
+  return modules;
+}
+
+function v20TreeHtml(site) {
+  const sel = v20Selected();
+  const bankCount = Math.max(1, v20Number(site.bank_count, 1));
+  const rackCount = Math.max(1, v20Number(site.rack_count, 1));
+  const scoreText = site.latest_score === null || site.latest_score === undefined ? '-' : site.latest_score;
+  let banks = '';
+
+  for (let bank = 1; bank <= bankCount; bank += 1) {
+    const bankActive = sel.bank === bank;
+    let racks = '';
+    for (let rack = 1; rack <= rackCount; rack += 1) {
+      const rackActive = bankActive && sel.rack === rack;
+      const modules = v20DistributeModules(site, rack);
+      let moduleHtml = modules.map((moduleNo) => {
+        const active = rackActive && sel.module === moduleNo && state.level === 'module';
+        return `<button type="button" class="tree-node-v20 module ${active ? 'active' : ''}" onclick="v20SetPath('module', ${bank}, ${rack}, 1, ${moduleNo})"><span class="node-icon">M</span><span>Module ${String(moduleNo).padStart(2, '0')}</span></button>`;
+      }).join('');
+      racks += `
+        <div class="tree-row-v20 rack-row">
+          <button type="button" class="tree-node-v20 rack ${rackActive && state.level === 'rack' ? 'active' : ''}" onclick="v20SetPath('rack', ${bank}, ${rack}, 1, ${modules[0] || 1})"><span class="node-icon">R</span><span>Rack ${String(rack).padStart(2, '0')}</span></button>
+          ${rackActive ? `<div class="tree-children-v20">
+            <button type="button" class="tree-node-v20 string ${state.level === 'string' ? 'active' : ''}" onclick="v20SetPath('string', ${bank}, ${rack}, 1, ${modules[0] || 1})"><span class="node-icon">S</span><span>String 01</span></button>
+            <div class="tree-children-v20 module-group">${moduleHtml}</div>
+          </div>` : ''}
+        </div>`;
+    }
+    banks += `
+      <div class="tree-row-v20 bank-row">
+        <button type="button" class="tree-node-v20 bank ${bankActive && state.level === 'bank' ? 'active' : ''}" onclick="v20SetPath('bank', ${bank}, ${sel.rack}, ${sel.string}, ${sel.module})"><span class="node-icon">B</span><span>Bank ${String(bank).padStart(2, '0')}</span></button>
+        ${bankActive ? `<div class="tree-children-v20">${racks}</div>` : ''}
+      </div>`;
+  }
+
+  return `
+    <div class="tree-head-v20">
+      <div>
+        <div class="tree-title-v20">계층 구조 탐색</div>
+        <div class="tree-site-v20">${escapeHtml(site.site_name || '-')}</div>
+        <div class="tree-bms-v20">${escapeHtml(site.bms_id || '-')}</div>
+      </div>
+      <span class="tree-score-v20 ${scoreClass(scoreText)}">${escapeHtml(scoreText)}</span>
+    </div>
+    <div class="tree-body-v20">${banks}</div>
+    <div class="tree-legend-v20"><span><i class="dot good"></i>정상</span><span><i class="dot warn"></i>주의</span><span><i class="dot bad"></i>비정상</span><span><i class="dot off"></i>오프라인</span></div>`;
+}
+
+function v20LevelTitle(level) {
+  if (level === 'bank') return 'Bank 상세';
+  if (level === 'rack') return 'Rack 상세';
+  if (level === 'string') return 'String 상세';
+  return 'Module 상세';
+}
+
+function v20Breadcrumb(site) {
+  const sel = v20Selected();
+  const parts = ['사이트 목록', site.site_name || '-', `Bank ${String(sel.bank).padStart(2, '0')}`];
+  if (state.level !== 'bank') parts.push(`Rack ${String(sel.rack).padStart(2, '0')}`);
+  if (state.level === 'string' || state.level === 'module') parts.push(`String ${String(sel.string).padStart(2, '0')}`);
+  if (state.level === 'module') parts.push(`Module ${String(sel.module).padStart(2, '0')}`);
+  return parts.map(escapeHtml).join(' <span>›</span> ');
+}
+
+function v20SiteOptions() {
+  return state.sites.map((s) => {
+    const label = `${s.site_name || s.site_id} / ${s.bms_id || '-'}`;
+    return `<option value="${escapeHtml(s.site_id)}" ${String(s.site_id) === String(state.selectedSiteId) ? 'selected' : ''}>${escapeHtml(label)}</option>`;
+  }).join('');
+}
+
+function v20SummaryCards(site, level) {
+  return `
+    <div class="detail-grid-top">
+      <div class="info-card"><small>최대 이상 점수</small><b>${score(level.max_score ?? site.latest_score)}</b></div>
+      <div class="info-card"><small>상태</small><b>${badge(level.status || site.status)}</b></div>
+      <div class="info-card"><small>최근 분석 시각</small><b>${escapeHtml(level.last_analysis_time || site.last_analysis_time || '-')}</b></div>
+      <div class="info-card"><small>위험 위치</small><b>${escapeHtml(site.risk_location || '-')}</b></div>
+    </div>`;
+}
+
+function v20FallbackCells() {
+  return [18,22,31,26,29,34,92,45,28,33,24,37,41,27,39,32,30,25,48,21]
+    .map((v,i) => ({ cell_no:i+1, score:v, status:v>=80?'abnormal':v>=40?'warning':'normal', voltage:(3.62 + i/1000).toFixed(3), temperature:(30 + v/8).toFixed(1) }));
+}
+
+function v20LevelSummary(site) {
+  const sel = v20Selected();
+  const rows = [];
+  if (state.level === 'bank') {
+    const rackCount = v20Number(site.rack_count, 1);
+    for (let r = 1; r <= rackCount; r += 1) rows.push({ name:`Rack ${String(r).padStart(2,'0')}`, type:'rack', score: r === sel.rack ? site.latest_score : Math.max(10, Number(site.latest_score || 0) - r * 7), status: r === sel.rack ? site.status : 'normal' });
+  } else if (state.level === 'rack') {
+    rows.push({ name:'String 01', type:'string', score: site.latest_score, status: site.status });
+  } else if (state.level === 'string') {
+    v20DistributeModules(site, sel.rack).forEach((m) => rows.push({ name:`Module ${String(m).padStart(2,'0')}`, type:'module', score: m === sel.module ? site.latest_score : Math.max(10, Number(site.latest_score || 0) - m * 3), status: m === sel.module ? site.status : 'normal' }));
+  }
+  return `
+    <section class="panel"><div class="panel-title"><span class="mini-icon">▦</span>${escapeHtml(v20LevelTitle(state.level))} 구성 요약</div>
+      <div class="ranking-table"><table><thead><tr><th>구성</th><th>구분</th><th>점수</th><th>상태</th></tr></thead><tbody>
+        ${rows.map((r) => `<tr><td><b>${escapeHtml(r.name)}</b></td><td>${escapeHtml(r.type)}</td><td>${score(r.score)}</td><td>${badge(r.status)}</td></tr>`).join('')}
+      </tbody></table></div>
+    </section>`;
+}
+
+async function renderDetail() {
+  try {
+    setActive('detail');
+    setLoading('사이트 상세 로딩 중');
+    await loadCommonData();
+    const baseSite = currentSite();
+    const detailData = await fetchJson(API.site(baseSite.site_id), null);
+    const site = detailData?.result || baseSite;
+    const levelData = await fetchJson(API.level(site.site_id, state.level), null);
+    const level = levelData?.result || {};
+    const recData = await fetchJson(API.recommendations(site.site_id), null);
+    const recs = Array.isArray(recData?.result) ? recData.result : [];
+    const cells = Array.isArray(level.cells) ? level.cells : v20FallbackCells();
+    v20ShowTree(site);
+
+    const cellSection = state.level === 'module' ? `
+        <section class="panel"><div class="panel-title"><span class="mini-icon">▦</span>Cell 상태 맵</div><div class="cell-map">
+          ${cells.map((c) => `<div class="cell ${c.status === 'abnormal' ? 'bad' : c.status === 'warning' ? 'warn' : 'good'}"><b>Cell ${String(c.cell_no).padStart(2,'0')}</b><span>${escapeHtml(c.score)}</span></div>`).join('')}
+        </div></section>
+        <section class="panel"><div class="panel-title"><span class="mini-icon">▥</span>위험 Cell 상세</div><div class="ranking-table"><table><thead><tr><th>Cell</th><th>점수</th><th>상태</th><th>전압</th><th>온도</th></tr></thead><tbody>
+          ${cells.slice().sort((a,b)=>Number(b.score||0)-Number(a.score||0)).slice(0,8).map((c)=>`<tr><td><b>Cell ${String(c.cell_no).padStart(2,'0')}</b></td><td>${score(c.score)}</td><td>${badge(c.status)}</td><td>${escapeHtml(c.voltage || '-')} V</td><td>${escapeHtml(c.temperature || '-')} ℃</td></tr>`).join('')}
+        </tbody></table></div></section>` : v20LevelSummary(site);
+
+    content.innerHTML = `
+    <div class="page detail-page">
+      <section class="detail-left">
+        <div class="breadcrumb">${v20Breadcrumb(site)}</div>
+        <div class="detail-title detail-title-row"><div class="site-icon">▦</div><div><h1>${escapeHtml(site.site_name)} <span>›</span> ${escapeHtml(v20LevelTitle(state.level))}</h1><p>${escapeHtml(site.region)} · ${escapeHtml(site.manufacturer)} · ${escapeHtml(site.bms_id || '')}</p></div><select class="site-select" onchange="selectSite(this.value)">${v20SiteOptions()}</select></div>
+        <div class="level-tabs"><button class="level-tab ${state.level==='bank'?'active':''}" onclick="v20SetPath('bank', v20Selected().bank, v20Selected().rack, v20Selected().string, v20Selected().module)">Bank</button><button class="level-tab ${state.level==='rack'?'active':''}" onclick="v20SetPath('rack', v20Selected().bank, v20Selected().rack, v20Selected().string, v20Selected().module)">Rack</button><button class="level-tab ${state.level==='string'?'active':''}" onclick="v20SetPath('string', v20Selected().bank, v20Selected().rack, v20Selected().string, v20Selected().module)">String</button><button class="level-tab ${state.level==='module'?'active':''}" onclick="v20SetPath('module', v20Selected().bank, v20Selected().rack, v20Selected().string, v20Selected().module)">Module</button></div>
+        ${v20SummaryCards(site, level)}
+        ${cellSection}
+      </section>
+      <aside class="detail-right"><section class="panel"><div class="panel-title"><span class="mini-icon">⚠</span>운영 권고</div><div class="alarm-list">
+        ${(recs.length ? recs : [{title:'Detailed inspection required', message:'High score was detected from anomaly_score.', action:'Check selected hierarchy from the left tree.'}]).map((r)=>`<div class="alarm-item"><div class="alarm-icon red">⚠</div><div><div class="alarm-name">${escapeHtml(r.title)}</div><small>${escapeHtml(r.message || r.action || '')}</small></div></div>`).join('')}
+      </div></section></aside>
+    </div>`;
+  } catch (error) {
+    console.error('[monitor] renderDetail failed', error);
+    showError('사이트 상세 표시 중 오류가 발생했습니다.', error.stack || error.message);
+  }
+}
+
+function setLevel(level) {
+  const sel = v20Selected();
+  v20SetPath(level, sel.bank, sel.rack, sel.string, sel.module);
+}
+window.setLevel = setLevel;
+
+function selectSite(siteId) {
+  state.selectedSiteId = siteId;
+  state.selectedBankNo = 1;
+  state.selectedRackNo = 1;
+  state.selectedStringNo = 1;
+  state.selectedModuleNo = 1;
+  state.level = 'module';
+  renderDetail();
+}
+window.selectSite = selectSite;
+
+function nav(page) {
+  if (page !== 'detail') v20HideTree();
+  if (page === 'dashboard') return renderDashboard();
+  if (page === 'sites') return renderSites();
+  if (page === 'detail') return renderDetail();
+  if (page === 'history') return renderPlaceholder('실행 이력', '파이프라인 실행 이력 화면은 다음 단계에서 연결합니다.');
+  if (page === 'settings') return renderPlaceholder('설정', '알림, 모델, 사용자 설정 화면은 다음 단계에서 연결합니다.');
+}
+window.nav = nav;

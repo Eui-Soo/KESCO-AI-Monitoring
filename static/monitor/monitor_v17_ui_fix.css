@@ -1,0 +1,190 @@
+:root {
+  --v17-blue: #0969e8;
+  --v17-line: #dce6f2;
+  --v17-text: #0b1b36;
+  --v17-green: #17b26a;
+}
+
+.detail-page {
+  display: grid !important;
+  grid-template-columns: minmax(0, 1fr) 420px !important;
+  gap: 28px !important;
+  align-items: start !important;
+}
+
+.detail-left,
+.detail-right {
+  min-width: 0;
+}
+
+.breadcrumb {
+  display: flex !important;
+  flex-wrap: wrap !important;
+  gap: 8px !important;
+  align-items: center !important;
+  color: #64748b !important;
+  font-weight: 800 !important;
+  margin: 0 0 22px !important;
+}
+
+.detail-title-row {
+  display: grid !important;
+  grid-template-columns: 78px minmax(0, 1fr) 420px !important;
+  gap: 18px !important;
+  align-items: center !important;
+  margin-bottom: 24px !important;
+}
+
+.detail-title-row h1 {
+  margin: 0 0 8px !important;
+  font-size: 34px !important;
+  letter-spacing: -1px !important;
+  color: var(--v17-text) !important;
+}
+
+.detail-title-row p {
+  margin: 0 !important;
+  color: #334155 !important;
+  font-weight: 750 !important;
+}
+
+.site-select {
+  height: 48px !important;
+  border: 1px solid var(--v17-line) !important;
+  border-radius: 12px !important;
+  background: #fff !important;
+  padding: 0 14px !important;
+  font-weight: 800 !important;
+  color: #10213d !important;
+  min-width: 0 !important;
+  width: 100% !important;
+}
+
+.level-tabs {
+  display: inline-flex !important;
+  gap: 8px !important;
+  padding: 4px !important;
+  border: 1px solid var(--v17-line) !important;
+  border-radius: 14px !important;
+  background: #f3f7fc !important;
+  margin: 0 0 16px !important;
+}
+
+.level-tab {
+  height: 42px !important;
+  min-width: 86px !important;
+  border: 0 !important;
+  border-radius: 11px !important;
+  background: transparent !important;
+  color: #475569 !important;
+  font-weight: 900 !important;
+  cursor: pointer !important;
+}
+
+.level-tab.active {
+  background: #fff !important;
+  color: var(--v17-blue) !important;
+  box-shadow: 0 4px 12px rgba(9, 105, 232, .12) !important;
+}
+
+.detail-grid-top {
+  display: grid !important;
+  grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+  gap: 14px !important;
+  margin-bottom: 16px !important;
+}
+
+.info-card {
+  min-height: 86px !important;
+  border: 1px solid var(--v17-line) !important;
+  border-radius: 16px !important;
+  background: #fff !important;
+  box-shadow: 0 8px 22px rgba(23,43,77,.06) !important;
+  padding: 18px 20px !important;
+  display: flex !important;
+  flex-direction: column !important;
+  align-items: flex-start !important;
+  justify-content: center !important;
+  gap: 10px !important;
+}
+
+.info-card small {
+  color: #64748b !important;
+  font-size: 13px !important;
+  font-weight: 900 !important;
+}
+
+.info-card b {
+  color: #0b1b36 !important;
+  font-size: 16px !important;
+  font-weight: 900 !important;
+  word-break: break-word !important;
+}
+
+.cell-map {
+  display: grid !important;
+  grid-template-columns: repeat(5, minmax(90px, 1fr)) !important;
+  gap: 12px !important;
+  padding: 20px !important;
+}
+
+.cell {
+  height: 74px !important;
+  border-radius: 12px !important;
+  display: flex !important;
+  flex-direction: column !important;
+  justify-content: center !important;
+  align-items: center !important;
+  gap: 8px !important;
+  font-weight: 900 !important;
+  border: 1px solid #dce6f2 !important;
+}
+
+.cell b {
+  display: block !important;
+  font-size: 13px !important;
+  color: #475569 !important;
+  line-height: 1 !important;
+}
+
+.cell span {
+  display: block !important;
+  font-size: 22px !important;
+  line-height: 1 !important;
+}
+
+.cell.good {
+  background: #ecfdf5 !important;
+  border-color: #cdeedc !important;
+  color: var(--v17-green) !important;
+}
+
+.cell.warn {
+  background: #fff7e6 !important;
+  border-color: #fde7b1 !important;
+  color: #c77b00 !important;
+}
+
+.cell.bad {
+  background: #fff1f2 !important;
+  border-color: #fecaca !important;
+  color: #dc2626 !important;
+}
+
+@media (max-width: 1280px) {
+  .detail-page {
+    grid-template-columns: 1fr !important;
+  }
+
+  .detail-title-row {
+    grid-template-columns: 78px minmax(0, 1fr) !important;
+  }
+
+  .site-select {
+    grid-column: 1 / -1;
+  }
+
+  .detail-grid-top {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  }
+}

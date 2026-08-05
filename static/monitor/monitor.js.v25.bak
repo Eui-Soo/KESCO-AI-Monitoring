@@ -1,0 +1,776 @@
+/* KESCO Monitor UI - v8 safe API integration
+ * 목표: API 연동은 유지하되, 어떤 API/렌더링 오류가 나도 화면이 멈추지 않게 한다.
+ */
+
+const content = document.getElementById('content');
+const navItems = document.querySelectorAll('.nav-item');
+const topbarTitle = document.getElementById('topbarTitle');
+
+const API = {
+  system: '/api/v1/monitor/system-status',
+  dashboard: '/api/v1/monitor/dashboard/summary',
+  sites: '/api/v1/monitor/sites',
+  site: (id) => `/api/v1/monitor/sites/${encodeURIComponent(id)}`,
+  level: (id, level = 'module') => `/api/v1/monitor/sites/${encodeURIComponent(id)}/level?level=${encodeURIComponent(level)}`,
+  trend: (id) => `/api/v1/monitor/sites/${encodeURIComponent(id)}/trend?level=module`,
+  recommendations: (id) => `/api/v1/monitor/recommendations?site_id=${encodeURIComponent(id || 'SITE-0021')}`,
+};
+
+const fallbackSites = [
+  { site_id:'SITE-0021', site_no:21, site_name:'영광 ESS 2호기', region:'전라남도 영광군', install_area:'전력남서부', manufacturer:'삼성SDI', installed_at:'2024-11-15', latest_score:93.7, status:'abnormal', status_text:'비정상', last_analysis_time:'2025-05-19 10:20:15', risk_location:'Bank 01 > Rack 03 > String 02 > Module 05 > Cell 07' },
+  { site_id:'SITE-0022', site_no:22, site_name:'평택 ESS 1호기', region:'경기도 평택시', install_area:'경기남부', manufacturer:'LG에너지솔루션', installed_at:'2024-08-21', latest_score:87.2, status:'abnormal', status_text:'비정상', last_analysis_time:'2025-05-19 10:15:12', risk_location:'Bank 01 > Rack 01 > String 04 > Module 02 > Cell 12' },
+  { site_id:'SITE-0023', site_no:23, site_name:'군산 ESS 3호기', region:'전라북도 군산시', install_area:'전력동부', manufacturer:'삼성SDI', installed_at:'2024-09-30', latest_score:72.4, status:'warning', status_text:'주의', last_analysis_time:'2025-05-19 10:18:09', risk_location:'Bank 01 > Rack 02 > String 01 > Module 08' },
+  { site_id:'SITE-0024', site_no:24, site_name:'김해 ESS 1호기', region:'경상남도 김해시', install_area:'경남서부', manufacturer:'LG에너지솔루션', installed_at:'2024-07-10', latest_score:68.1, status:'warning', status_text:'주의', last_analysis_time:'2025-05-19 10:10:23', risk_location:'Bank 01 > Rack 04 > String 03' },
+  { site_id:'SITE-0025', site_no:25, site_name:'제주 ESS 2호기', region:'제주특별자치도 제주시', install_area:'제주권', manufacturer:'CATL', installed_at:'2024-12-05', latest_score:34.6, status:'normal', status_text:'정상', last_analysis_time:'2025-05-19 10:05:08', risk_location:'-' },
+  { site_id:'SITE-0026', site_no:26, site_name:'울산 ESS 1호기', region:'울산광역시 울주군', install_area:'영남동부', manufacturer:'LG에너지솔루션', installed_at:'2024-10-22', latest_score:null, status:'unavailable', status_text:'진단 불가', last_analysis_time:null, risk_location:'-' },
+];
+
+const state = {
+  page: 'dashboard',
+  sites: fallbackSites,
+  selectedSiteId: 'SITE-0021',
+  dashboard: null,
+  level: 'module',
+};
+
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>'"]/g, (ch) => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[ch]));
+}
+
+function setLoading(title = '로딩 중') {
+  if (!content) return;
+  content.innerHTML = `<div class="page"><section class="panel" style="min-height:360px;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:14px"><div style="font-size:38px">⏳</div><h2>${escapeHtml(title)}</h2><p style="color:#738399;margin:0">AI 모니터링 데이터를 불러오는 중입니다.</p></section></div>`;
+}
+
+function showError(message, detail = '') {
+  if (!content) return;
+  content.innerHTML = `<div class="page"><section class="panel" style="border-color:#fecaca;background:#fffafa"><div class="panel-title"><span class="mini-icon">⚠</span>화면 렌더링 오류</div><p style="font-weight:800;color:#b91c1c">${escapeHtml(message)}</p><pre style="white-space:pre-wrap;background:#fff;border:1px solid #fecaca;border-radius:12px;padding:14px;color:#7f1d1d;max-height:220px;overflow:auto">${escapeHtml(detail)}</pre><button class="table-action" onclick="location.reload()">새로고침</button></section></div>`;
+}
+
+async function fetchJson(url, fallback = null) {
+  try {
+    const res = await fetch(url, { headers: { Accept: 'application/json' }, cache: 'no-store' });
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText} - ${url}`);
+    return await res.json();
+  } catch (error) {
+    console.warn('[monitor] API fallback:', url, error);
+    return fallback;
+  }
+}
+
+function normalizeSites(data) {
+  if (Array.isArray(data)) return data;
+  if (Array.isArray(data?.items)) return data.items;
+  if (Array.isArray(data?.result?.items)) return data.result.items;
+  if (Array.isArray(data?.result)) return data.result;
+  return fallbackSites;
+}
+
+function setActive(page) {
+  state.page = page;
+  if (topbarTitle) topbarTitle.textContent = page === 'dashboard' ? '대시보드' : page === 'sites' ? '사이트 목록' : page === 'detail' ? '사이트 상세' : page === 'history' ? '실행 이력' : '설정';
+  navItems.forEach((item) => item.classList.toggle('active', item.dataset.page === page));
+}
+
+function statusText(siteOrStatus) {
+  if (typeof siteOrStatus === 'string') {
+    if (siteOrStatus === 'abnormal') return '비정상';
+    if (siteOrStatus === 'warning') return '주의';
+    if (siteOrStatus === 'normal') return '정상';
+    if (siteOrStatus === 'unavailable') return '진단 불가';
+    if (siteOrStatus === 'data_missing') return '데이터 없음';
+    return siteOrStatus;
+  }
+  return siteOrStatus?.status_text || statusText(siteOrStatus?.status || 'normal');
+}
+
+function statusClassByText(text) {
+  const value = statusText(text);
+  if (value === '정상') return 'good';
+  if (value === '주의') return 'warn';
+  if (value === '비정상' || value === '위험') return 'bad';
+  return 'gray';
+}
+
+function badge(siteOrStatus) {
+  const text = statusText(siteOrStatus);
+  return `<span class="state-badge ${statusClassByText(text)}">${escapeHtml(text)}</span>`;
+}
+
+function scoreClass(value) {
+  const n = Number(value);
+  if (Number.isNaN(n)) return 'gray';
+  if (n >= 71) return 'bad';
+  if (n >= 40) return 'warn';
+  return 'good';
+}
+
+function score(value) {
+  const display = value === null || value === undefined ? '-' : value;
+  return `<span class="score-badge ${scoreClass(display)}">${escapeHtml(display)}</span>`;
+}
+
+
+function v21StatusLabel(value) {
+  const raw = typeof value === 'object' ? (value?.status || value?.status_text) : value;
+  const key = String(raw || '').toLowerCase();
+  if (key === 'abnormal' || key === 'danger' || key === '비정상' || key === '위험') return '비정상';
+  if (key === 'warning' || key === 'caution' || key === '주의') return '주의';
+  if (key === 'normal' || key === '정상') return '정상';
+  if (key === 'unavailable' || key === '진단 불가') return '진단 불가';
+  if (key === 'data_missing' || key === '데이터 없음') return '데이터 없음';
+  return raw || '-';
+}
+
+function v21StatusClass(value) {
+  const label = v21StatusLabel(value);
+  if (label === '비정상') return 'bad';
+  if (label === '주의') return 'warn';
+  if (label === '정상') return 'good';
+  return 'gray';
+}
+
+function v21Badge(value) {
+  const label = v21StatusLabel(value);
+  return `<span class="state-badge ${v21StatusClass(value)}">${escapeHtml(label)}</span>`;
+}
+
+function v21Time(value) {
+  if (value === null || value === undefined || value === '') return '-';
+  let text = String(value).replace('T', ' ');
+  text = text.replace(/\.\d+/, '');
+  return text.slice(0, 19);
+}
+
+function v21ScoreValue(value) {
+  if (value === null || value === undefined || value === '') return '-';
+  const n = Number(value);
+  if (Number.isNaN(n)) return value;
+  return Math.round(n * 10) / 10;
+}
+
+function v21RiskText(site) {
+  const score = v21ScoreValue(site?.latest_score);
+  const label = v21StatusLabel(site);
+  if (label === '비정상') return `즉시 점검 권고 · 최고 이상점수 ${score}`;
+  if (label === '주의') return `주의 관찰 필요 · 최고 이상점수 ${score}`;
+  if (label === '정상') return `정상 범위 · 최고 이상점수 ${score}`;
+  return '진단 결과 없음';
+}
+
+function v21FilterSiteRows() {
+  const q = String(document.getElementById('v21SiteSearch')?.value || '').toLowerCase();
+  const manufacturer = String(document.getElementById('v21Manufacturer')?.value || '');
+  const region = String(document.getElementById('v21Region')?.value || '');
+  const area = String(document.getElementById('v21Area')?.value || '');
+  const status = String(document.getElementById('v21Status')?.value || '');
+
+  document.querySelectorAll('.v21-site-row').forEach((row) => {
+    const okSearch = !q || String(row.dataset.search || '').toLowerCase().includes(q);
+    const okManufacturer = !manufacturer || row.dataset.manufacturer === manufacturer;
+    const okRegion = !region || row.dataset.region === region;
+    const okArea = !area || row.dataset.area === area;
+    const okStatus = !status || row.dataset.status === status;
+    row.style.display = okSearch && okManufacturer && okRegion && okArea && okStatus ? '' : 'none';
+  });
+}
+window.v21FilterSiteRows = v21FilterSiteRows;
+
+
+function currentSite() {
+  return state.sites.find((s) => String(s.site_id) === String(state.selectedSiteId)) || state.sites[0] || fallbackSites[0];
+}
+
+function siteOptions() {
+  return state.sites.map((s) => {
+    const label = `${s.site_name || s.site_id} / ${s.bms_id || '-'}`;
+    return `<option value="${escapeHtml(s.site_id)}" ${String(s.site_id) === String(state.selectedSiteId) ? 'selected' : ''}>${escapeHtml(label)}</option>`;
+  }).join('');
+}
+
+function selectSite(siteId) {
+  state.selectedSiteId = siteId;
+  renderDetail();
+}
+window.selectSite = selectSite;
+
+function nav(page) {
+  if (page === 'dashboard') return renderDashboard();
+  if (page === 'sites') return renderSites();
+  if (page === 'detail') return renderDetail();
+  if (page === 'history') return renderPlaceholder('실행 이력', '파이프라인 실행 이력 화면은 다음 단계에서 연결합니다.');
+  if (page === 'settings') return renderPlaceholder('설정', '알림, 모델, 사용자 설정 화면은 다음 단계에서 연결합니다.');
+}
+window.nav = nav;
+
+function renderPlaceholder(title, desc) {
+  setActive(title === '실행 이력' ? 'history' : 'settings');
+  content.innerHTML = `<div class="page"><section class="panel"><div class="panel-title"><span class="mini-icon">▣</span>${escapeHtml(title)}</div><p style="color:#738399;font-weight:700">${escapeHtml(desc)}</p></section></div>`;
+}
+
+async function loadCommonData() {
+  const sitesData = await fetchJson(API.sites, { items: fallbackSites });
+  state.sites = normalizeSites(sitesData);
+  if (!state.sites.some((s) => String(s.site_id) === String(state.selectedSiteId))) {
+    state.selectedSiteId = state.sites[0]?.site_id || 'SITE-0021';
+  }
+}
+
+async function renderDashboard() {
+  try {
+    setActive('dashboard');
+    setLoading('대시보드 로딩 중');
+    await loadCommonData();
+
+    const dashboardData = await fetchJson(API.dashboard, null);
+    const result = dashboardData?.result || {};
+    const summary = result.summary || {};
+    const sites = state.sites || [];
+
+    const ranking = sites
+      .filter((s) => s.latest_score !== null && s.latest_score !== undefined)
+      .slice()
+      .sort((a, b) => Number(b.latest_score || 0) - Number(a.latest_score || 0))
+      .slice(0, 6);
+
+    const priority = ranking.slice(0, 3);
+    const counts = {
+      normal: summary.normal_site_count ?? sites.filter((s) => s.status === 'normal').length,
+      warning: summary.warning_site_count ?? sites.filter((s) => s.status === 'warning').length,
+      abnormal: summary.abnormal_site_count ?? sites.filter((s) => s.status === 'abnormal').length,
+    };
+
+    content.innerHTML = `
+    <div class="page v21-dashboard-page">
+      <div class="v21-dashboard-top">
+        <section class="v21-kpi-card">
+          <div class="v21-kpi-icon">▦</div>
+          <div>
+            <div class="v21-kpi-label">전체 사이트</div>
+            <div class="v21-kpi-value">${escapeHtml(summary.total_site_count ?? sites.length)}</div>
+          </div>
+        </section>
+        <section class="v21-kpi-card">
+          <div class="v21-kpi-icon green">AI</div>
+          <div>
+            <div class="v21-kpi-label">AI 진단 가능</div>
+            <div class="v21-kpi-value green">${escapeHtml(summary.ai_available_site_count ?? sites.filter((s) => s.is_ai_available).length)}</div>
+          </div>
+        </section>
+        <section class="v21-status-card">
+          <div class="v21-status-title">사이트 상태 요약</div>
+          <div class="v21-status-counts">
+            <div><b class="green">${escapeHtml(counts.normal)}</b><span>정상</span></div>
+            <div><b class="orange">${escapeHtml(counts.warning)}</b><span>주의</span></div>
+            <div><b class="red">${escapeHtml(counts.abnormal)}</b><span>비정상</span></div>
+          </div>
+        </section>
+      </div>
+
+      <div class="v21-dashboard-main">
+        <section class="panel v21-ranking-panel">
+          <div class="panel-title"><span class="mini-icon">▥</span>이상 점수 상위 사이트</div>
+          <div class="v21-ranking-table-wrap">
+            <table class="v21-table">
+              <thead>
+                <tr>
+                  <th style="width:64px">순위</th>
+                  <th>사이트 / BMS</th>
+                  <th>지역</th>
+                  <th>설치구역</th>
+                  <th>제조사</th>
+                  <th style="width:130px">최고 점수</th>
+                  <th style="width:110px">상태</th>
+                  <th style="width:170px">최근 분석</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${ranking.map((s, i) => `
+                  <tr class="clickable-row" onclick="selectSite('${escapeHtml(s.site_id)}')">
+                    <td><span class="v21-rank">${escapeHtml(i + 1)}</span></td>
+                    <td><b>${escapeHtml(s.site_name)}</b><small>${escapeHtml(s.bms_id || '-')}</small></td>
+                    <td>${escapeHtml(s.region || '-')}</td>
+                    <td>${escapeHtml(s.install_area || '-')}</td>
+                    <td>${escapeHtml(s.manufacturer || '-')}</td>
+                    <td>${score(v21ScoreValue(s.latest_score))}</td>
+                    <td>${v21Badge(s)}</td>
+                    <td>${escapeHtml(v21Time(s.last_analysis_time))}</td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          </div>
+          <div class="more-link" onclick="nav('sites')">전체 사이트 목록으로 이동 <span>›</span></div>
+        </section>
+
+        <section class="panel v21-priority-panel">
+          <div class="panel-title"><span class="mini-icon">⚠</span>우선 점검 대상 TOP 3</div>
+          <div class="v21-priority-list">
+            ${priority.map((s, i) => `
+              <div class="v21-priority-item ${v21StatusClass(s)}" onclick="selectSite('${escapeHtml(s.site_id)}')">
+                <div class="v21-priority-rank">${escapeHtml(i + 1)}</div>
+                <div class="v21-priority-body">
+                  <div class="v21-priority-title">${escapeHtml(s.site_name)}</div>
+                  <div class="v21-priority-sub">${escapeHtml(s.bms_id || '-')} · ${escapeHtml(s.install_area || '-')} · ${escapeHtml(s.manufacturer || '-')}</div>
+                </div>
+                <div class="v21-priority-score">
+                  <b>${escapeHtml(v21ScoreValue(s.latest_score))}</b>
+                  <span>${escapeHtml(v21RiskText(s))}</span>
+                </div>
+                <div class="chev">›</div>
+              </div>
+            `).join('')}
+          </div>
+        </section>
+      </div>
+    </div>`;
+  } catch (error) {
+    console.error('[monitor] renderDashboard failed', error);
+    showError('대시보드 표시 중 오류가 발생했습니다.', error.stack || error.message);
+  }
+}
+
+
+
+async function renderSites() {
+  try {
+    setActive('sites');
+    setLoading('사이트 목록 로딩 중');
+    await loadCommonData();
+
+    const sites = state.sites || [];
+    const manufacturers = [...new Set(sites.map((s) => s.manufacturer || '-'))].sort();
+    const regions = [...new Set(sites.map((s) => s.region || '-'))].sort();
+    const areas = [...new Set(sites.map((s) => s.install_area || '-'))].sort();
+
+    const aiCount = sites.filter((s) => s.is_ai_available).length;
+    const abnormalCount = sites.filter((s) => s.status === 'abnormal').length;
+    const warningCount = sites.filter((s) => s.status === 'warning').length;
+
+    content.innerHTML = `
+    <div class="page v21-sites-page">
+      <div class="v21-page-heading">
+        <div>
+          <h1>사이트 목록</h1>
+          <p>전체 사이트 현황 및 AI 진단 결과를 확인합니다.</p>
+        </div>
+        <div class="v21-site-summary">
+          <div><span>표시 사이트</span><b>${escapeHtml(sites.length)}</b></div>
+          <div><span>진단 가능</span><b>${escapeHtml(aiCount)}</b></div>
+          <div><span>주의</span><b class="orange">${escapeHtml(warningCount)}</b></div>
+          <div><span>비정상</span><b class="red">${escapeHtml(abnormalCount)}</b></div>
+        </div>
+      </div>
+
+      <section class="v21-filter-card">
+        <input id="v21SiteSearch" class="v21-input" oninput="v21FilterSiteRows()" placeholder="사이트명 또는 BMS ID 검색" />
+        <select id="v21Manufacturer" class="v21-select" onchange="v21FilterSiteRows()">
+          <option value="">제조사 전체</option>
+          ${manufacturers.map((v) => `<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`).join('')}
+        </select>
+        <select id="v21Region" class="v21-select" onchange="v21FilterSiteRows()">
+          <option value="">지역 전체</option>
+          ${regions.map((v) => `<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`).join('')}
+        </select>
+        <select id="v21Area" class="v21-select" onchange="v21FilterSiteRows()">
+          <option value="">설치구역 전체</option>
+          ${areas.map((v) => `<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`).join('')}
+        </select>
+        <select id="v21Status" class="v21-select" onchange="v21FilterSiteRows()">
+          <option value="">상태 전체</option>
+          <option value="normal">정상</option>
+          <option value="warning">주의</option>
+          <option value="abnormal">비정상</option>
+          <option value="unavailable">진단 불가</option>
+        </select>
+      </section>
+
+      <section class="panel v21-sites-table-panel">
+        <div class="v21-sites-table-wrap">
+          <table class="v21-table v21-sites-table">
+            <thead>
+              <tr>
+                <th>사이트 / BMS</th>
+                <th>지역</th>
+                <th>설치구역</th>
+                <th>제조사</th>
+                <th>설치일</th>
+                <th>최신 이상점수</th>
+                <th>상태</th>
+                <th>최근 분석시각</th>
+                <th>데이터</th>
+                <th>상세</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${sites.map((s) => `
+                <tr class="v21-site-row"
+                    data-search="${escapeHtml(`${s.site_name || ''} ${s.bms_id || ''} ${s.region || ''} ${s.install_area || ''} ${s.manufacturer || ''}`)}"
+                    data-manufacturer="${escapeHtml(s.manufacturer || '-')}"
+                    data-region="${escapeHtml(s.region || '-')}"
+                    data-area="${escapeHtml(s.install_area || '-')}"
+                    data-status="${escapeHtml(s.status || '')}">
+                  <td><b>${escapeHtml(s.site_name || '-')}</b><small>${escapeHtml(s.bms_id || '-')}</small></td>
+                  <td>${escapeHtml(s.region || '-')}</td>
+                  <td>${escapeHtml(s.install_area || '-')}</td>
+                  <td>${escapeHtml(s.manufacturer || '-')}</td>
+                  <td>${escapeHtml(s.installed_at || '-')}</td>
+                  <td>${score(v21ScoreValue(s.latest_score))}</td>
+                  <td>${v21Badge(s)}</td>
+                  <td>${escapeHtml(v21Time(s.last_analysis_time))}</td>
+                  <td><span class="v21-data-pill">${escapeHtml(s.data_source || '-')}</span></td>
+                  <td><button class="v21-detail-btn" onclick="selectSite('${escapeHtml(s.site_id)}')">상세 보기</button></td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>`;
+  } catch (error) {
+    console.error('[monitor] renderSites failed', error);
+    showError('사이트 목록 표시 중 오류가 발생했습니다.', error.stack || error.message);
+  }
+}
+
+/* v24 detail clean rebuild: single renderDetail, clean tree, site/bank/rack/string/module views */
+function v24EnsureDetailPath() {
+  if (!state.detailPath) state.detailPath = { level: 'site', bank: 1, rack: 1, string: 1, module: 1, collapsed: false };
+  if (!state.detailPath.level) state.detailPath.level = state.level || 'site';
+  return state.detailPath;
+}
+
+function v24StatusKey(value) {
+  const v = String(value || '').toLowerCase();
+  if (v === 'abnormal' || v === 'danger' || v === 'bad') return 'abnormal';
+  if (v === 'warning' || v === 'caution' || v === 'warn') return 'warning';
+  if (v === 'offline' || v === 'unavailable' || v === 'data_missing') return 'offline';
+  return 'normal';
+}
+
+function v24StatusText(value) {
+  const key = v24StatusKey(value);
+  if (key === 'abnormal') return '비정상';
+  if (key === 'warning') return '주의';
+  if (key === 'offline') return '오프라인';
+  return '정상';
+}
+
+function v24StatusDot(status) {
+  const key = v24StatusKey(status);
+  return `<span class="tree-dot ${key}" title="${v24StatusText(key)}"></span>`;
+}
+
+function v24LevelTitle(level) {
+  if (level === 'site') return 'Site 정보';
+  if (level === 'bank') return 'Bank 상세';
+  if (level === 'rack') return 'Rack 상세';
+  if (level === 'string') return 'String 상세';
+  return 'Module 상세';
+}
+
+function v24LevelKo(level) {
+  if (level === 'site') return 'Site';
+  if (level === 'bank') return 'Bank';
+  if (level === 'rack') return 'Rack';
+  if (level === 'string') return 'String';
+  return 'Module';
+}
+
+function v24FormatTime(value) {
+  if (!value) return '-';
+  return String(value).replace('T', ' ').split('.')[0];
+}
+
+function v24ScoreValue(value) {
+  if (value === null || value === undefined || value === '') return '-';
+  const n = Number(value);
+  if (Number.isNaN(n)) return value;
+  return Math.round(n);
+}
+
+function v24MakeChildStatus(site, seed) {
+  const base = Number(site?.latest_score ?? 0);
+  const n = Math.max(0, Math.min(100, base - (seed % 5) * 7 + (seed % 3) * 3));
+  if (n >= 71) return 'abnormal';
+  if (n >= 40) return 'warning';
+  return 'normal';
+}
+
+function v24Counts(site) {
+  return {
+    banks: Math.max(1, Number(site?.bank_count || 1)),
+    racks: Math.max(1, Number(site?.rack_count || 1)),
+    strings: Math.max(1, Number(site?.string_count || 1)),
+    modules: Math.max(1, Number(site?.module_count || 1)),
+    cells: Math.max(20, Number(site?.cell_count || 20)),
+  };
+}
+
+function v24SetDetailLevel(level, bank = null, rack = null, stringNo = null, module = null) {
+  const p = v24EnsureDetailPath();
+  p.level = level;
+  state.level = level === 'site' ? 'site' : level;
+  if (bank !== null) p.bank = Number(bank) || 1;
+  if (rack !== null) p.rack = Number(rack) || 1;
+  if (stringNo !== null) p.string = Number(stringNo) || 1;
+  if (module !== null) p.module = Number(module) || 1;
+  p.collapsed = false;
+  renderDetail();
+}
+window.v24SetDetailLevel = v24SetDetailLevel;
+
+function v24ResetDetailTree() {
+  const p = v24EnsureDetailPath();
+  p.level = 'site';
+  p.bank = 1;
+  p.rack = 1;
+  p.string = 1;
+  p.module = 1;
+  p.collapsed = true;
+  state.level = 'site';
+  renderDetail();
+}
+window.v24ResetDetailTree = v24ResetDetailTree;
+
+function v24GoSites() {
+  removeDetailTree();
+  renderSites();
+}
+window.v24GoSites = v24GoSites;
+
+function v24TreeItem(level, label, status, active, onclick, depth = 0) {
+  return `<button type="button" class="v24-tree-item ${active ? 'active' : ''} depth-${depth}" onclick="${onclick}">
+    ${v24StatusDot(status)}<span class="tree-level-code">${escapeHtml(v24LevelKo(level).slice(0,1))}</span><span class="tree-label">${escapeHtml(label)}</span>
+  </button>`;
+}
+
+function updateDetailTree(site) {
+  const sidebar = document.querySelector('.sidebar');
+  if (!sidebar) return;
+  let box = document.getElementById('detailTreeBox');
+  if (!box) {
+    box = document.createElement('section');
+    box.id = 'detailTreeBox';
+    box.className = 'v24-detail-tree-card';
+    const nav = sidebar.querySelector('.nav-list');
+    if (nav && nav.parentNode) nav.parentNode.insertBefore(box, nav.nextSibling);
+    else sidebar.appendChild(box);
+  }
+  const p = v24EnsureDetailPath();
+  const c = v24Counts(site);
+  const siteStatus = v24StatusKey(site.status);
+  let html = `
+    <div class="tree-card-head">
+      <div><b>계층 구조 탐색</b><small>현재 사이트 기준</small></div>
+      <button type="button" class="tree-reset-btn" onclick="v24ResetDetailTree()" title="계층 접기">초기화</button>
+    </div>
+    <button type="button" class="tree-site-summary ${p.level === 'site' ? 'active' : ''}" onclick="v24SetDetailLevel('site')">
+      ${v24StatusDot(siteStatus)}
+      <div><b>${escapeHtml(site.site_name || 'Site')}</b><small>${escapeHtml(site.bms_id || '-')}</small></div>
+      <em>${escapeHtml(v24ScoreValue(site.latest_score))}</em>
+    </button>
+  `;
+  if (!p.collapsed) {
+    html += `<div class="tree-branch">`;
+    html += v24TreeItem('bank', `Bank ${String(p.bank).padStart(2,'0')}`, v24MakeChildStatus(site, 1), p.level === 'bank', `v24SetDetailLevel('bank', ${p.bank})`, 0);
+    for (let r = 1; r <= Math.min(c.racks, 8); r++) {
+      const rActive = p.rack === r && ['rack','string','module'].includes(p.level);
+      html += v24TreeItem('rack', `Rack ${String(r).padStart(2,'0')}`, v24MakeChildStatus(site, r + 2), rActive, `v24SetDetailLevel('rack', ${p.bank}, ${r})`, 1);
+      if (r === p.rack) {
+        const stringsPerRack = Math.max(1, Math.ceil(c.strings / c.racks));
+        for (let s = 1; s <= Math.min(stringsPerRack, 4); s++) {
+          const sActive = p.string === s && ['string','module'].includes(p.level);
+          html += v24TreeItem('string', `String ${String(s).padStart(2,'0')}`, v24MakeChildStatus(site, r * 10 + s), sActive, `v24SetDetailLevel('string', ${p.bank}, ${r}, ${s})`, 2);
+          if (s === p.string) {
+            const modulesPerRack = Math.max(1, Math.ceil(c.modules / c.racks));
+            for (let m = 1; m <= Math.min(modulesPerRack, 12); m++) {
+              const moduleNo = (r - 1) * modulesPerRack + m;
+              if (moduleNo > c.modules) break;
+              const mActive = p.module === moduleNo && p.level === 'module';
+              html += v24TreeItem('module', `Module ${String(moduleNo).padStart(2,'0')}`, v24MakeChildStatus(site, moduleNo), mActive, `v24SetDetailLevel('module', ${p.bank}, ${r}, ${s}, ${moduleNo})`, 3);
+            }
+          }
+        }
+      }
+    }
+    html += `</div>`;
+  }
+  html += `<div class="tree-legend"><span><i class="tree-dot normal"></i>정상</span><span><i class="tree-dot warning"></i>주의</span><span><i class="tree-dot abnormal"></i>비정상</span><span><i class="tree-dot offline"></i>오프라인</span></div>`;
+  box.innerHTML = html;
+}
+
+function removeDetailTree() {
+  const box = document.getElementById('detailTreeBox');
+  if (box) box.remove();
+}
+
+function v24Breadcrumb(site, p) {
+  const parts = [
+    `<button type="button" onclick="v24GoSites()">사이트 목록</button>`,
+    `<button type="button" onclick="v24SetDetailLevel('site')">${escapeHtml(site.site_name)}</button>`,
+  ];
+  if (['bank','rack','string','module'].includes(p.level)) parts.push(`<button type="button" onclick="v24SetDetailLevel('bank', ${p.bank})">Bank ${String(p.bank).padStart(2,'0')}</button>`);
+  if (['rack','string','module'].includes(p.level)) parts.push(`<button type="button" onclick="v24SetDetailLevel('rack', ${p.bank}, ${p.rack})">Rack ${String(p.rack).padStart(2,'0')}</button>`);
+  if (['string','module'].includes(p.level)) parts.push(`<button type="button" onclick="v24SetDetailLevel('string', ${p.bank}, ${p.rack}, ${p.string})">String ${String(p.string).padStart(2,'0')}</button>`);
+  if (p.level === 'module') parts.push(`<button type="button" onclick="v24SetDetailLevel('module', ${p.bank}, ${p.rack}, ${p.string}, ${p.module})">Module ${String(p.module).padStart(2,'0')}</button>`);
+  return `<div class="breadcrumb v24-breadcrumb">${parts.join('<span>›</span>')}</div>`;
+}
+
+function v24InfoCard(title, value, cls = '') {
+  return `<div class="info-card ${cls}"><small>${escapeHtml(title)}</small><b>${value}</b></div>`;
+}
+
+function v24EntityCards(site, p) {
+  const c = v24Counts(site);
+  if (p.level === 'site') {
+    const banks = Array.from({ length: c.banks }, (_, i) => i + 1);
+    return `<section class="panel v24-level-panel"><div class="panel-title"><span class="mini-icon">▦</span>Bank 구성</div><div class="v24-card-grid">
+      ${banks.map((b) => `<button class="v24-entity-card" onclick="v24SetDetailLevel('bank', ${b})">${v24StatusDot(v24MakeChildStatus(site, b))}<strong>Bank ${String(b).padStart(2,'0')}</strong><small>Rack ${c.racks} · Module ${c.modules}</small><em>${escapeHtml(v24StatusText(v24MakeChildStatus(site, b)))}</em></button>`).join('')}
+    </div></section>`;
+  }
+  if (p.level === 'bank') {
+    return `<section class="panel v24-level-panel"><div class="panel-title"><span class="mini-icon">▦</span>Rack 구성</div><div class="v24-card-grid">
+      ${Array.from({ length: Math.min(c.racks, 12) }, (_, i) => i + 1).map((r) => `<button class="v24-entity-card" onclick="v24SetDetailLevel('rack', ${p.bank}, ${r})">${v24StatusDot(v24MakeChildStatus(site, r + 2))}<strong>Rack ${String(r).padStart(2,'0')}</strong><small>String ${Math.max(1, Math.ceil(c.strings / c.racks))} · Module ${Math.max(1, Math.ceil(c.modules / c.racks))}</small><em>${escapeHtml(v24StatusText(v24MakeChildStatus(site, r + 2)))}</em></button>`).join('')}
+    </div></section>`;
+  }
+  if (p.level === 'rack') {
+    const stringsPerRack = Math.max(1, Math.ceil(c.strings / c.racks));
+    return `<section class="panel v24-level-panel"><div class="panel-title"><span class="mini-icon">▦</span>String 구성</div><div class="v24-card-grid">
+      ${Array.from({ length: Math.min(stringsPerRack, 8) }, (_, i) => i + 1).map((s) => `<button class="v24-entity-card" onclick="v24SetDetailLevel('string', ${p.bank}, ${p.rack}, ${s})">${v24StatusDot(v24MakeChildStatus(site, p.rack * 10 + s))}<strong>String ${String(s).padStart(2,'0')}</strong><small>Module ${Math.max(1, Math.ceil(c.modules / c.racks))}</small><em>${escapeHtml(v24StatusText(v24MakeChildStatus(site, p.rack * 10 + s)))}</em></button>`).join('')}
+    </div></section>`;
+  }
+  if (p.level === 'string') {
+    const modulesPerRack = Math.max(1, Math.ceil(c.modules / c.racks));
+    return `<section class="panel v24-level-panel"><div class="panel-title"><span class="mini-icon">▦</span>Module 구성</div><div class="v24-card-grid">
+      ${Array.from({ length: Math.min(modulesPerRack, 16) }, (_, i) => (p.rack - 1) * modulesPerRack + i + 1).filter((m) => m <= c.modules).map((m) => `<button class="v24-entity-card" onclick="v24SetDetailLevel('module', ${p.bank}, ${p.rack}, ${p.string}, ${m})">${v24StatusDot(v24MakeChildStatus(site, m))}<strong>Module ${String(m).padStart(2,'0')}</strong><small>Cell 20</small><em>${escapeHtml(v24StatusText(v24MakeChildStatus(site, m)))}</em></button>`).join('')}
+    </div></section>`;
+  }
+  return '';
+}
+
+function v24ModuleCells(level) {
+  const cells = Array.isArray(level.cells) ? level.cells : [18,22,31,26,29,34,92,45,28,33,24,37,41,27,39,32,30,25,48,21].map((v,i) => ({ cell_no:i+1, score:v, status:v>=80?'abnormal':v>=40?'warning':'normal', voltage:(3.62 + i/1000).toFixed(3), temperature:(30 + v/8).toFixed(1) }));
+  return `<section class="panel"><div class="panel-title"><span class="mini-icon">▦</span>Cell 상태 맵</div><div class="cell-map">
+    ${cells.map((c) => `<div class="cell ${v24StatusKey(c.status)}"><b>Cell ${String(c.cell_no).padStart(2,'0')}</b><span>${escapeHtml(v24ScoreValue(c.score))}</span></div>`).join('')}
+  </div></section>
+  <section class="panel"><div class="panel-title"><span class="mini-icon">▥</span>위험 Cell 상세</div><div class="ranking-table"><table><thead><tr><th>Cell</th><th>점수</th><th>상태</th><th>전압</th><th>온도</th></tr></thead><tbody>
+    ${cells.slice().sort((a,b)=>Number(b.score||0)-Number(a.score||0)).slice(0,8).map((c)=>`<tr><td><b>Cell ${String(c.cell_no).padStart(2,'0')}</b></td><td>${score(v24ScoreValue(c.score))}</td><td>${badge(v24StatusKey(c.status))}</td><td>${escapeHtml(c.voltage || '-')} V</td><td>${escapeHtml(c.temperature || '-')} ℃</td></tr>`).join('')}
+  </tbody></table></div></section>`;
+}
+
+function v24RightPanel(site, level) {
+  const maxScore = v24ScoreValue(level.max_score ?? site.latest_score);
+  const status = v24StatusKey(level.status || site.status);
+  const action = status === 'abnormal' ? '즉시 점검 권고' : status === 'warning' ? '주의 관찰 필요' : '정상 운전';
+  return `<aside class="detail-right v24-right-stack">
+    <section class="panel v24-side-card"><div class="panel-title"><span class="mini-icon">⚠</span>운영 권고</div>
+      <div class="v24-reco-main ${status}"><b>${escapeHtml(action)}</b><span>최고 이상점수 ${escapeHtml(maxScore)}</span></div>
+      <div class="v24-reco-row"><span>현재 상태</span><b>${escapeHtml(v24StatusText(status))}</b></div>
+      <div class="v24-reco-row"><span>위험 위치</span><b>${escapeHtml(site.risk_location || 'Latest anomaly_score result')}</b></div>
+    </section>
+    <section class="panel v24-side-card compact"><div class="panel-title"><span class="mini-icon">▤</span>분석 요약</div>
+      <div class="v24-reco-row"><span>최근 분석</span><b>${escapeHtml(v24FormatTime(site.last_analysis_time))}</b></div>
+      <div class="v24-reco-row"><span>Score Rows</span><b>${escapeHtml(site.score_row_count || '-')}</b></div>
+      <div class="v24-reco-row"><span>BMS ID</span><b>${escapeHtml(site.bms_id || '-')}</b></div>
+    </section>
+  </aside>`;
+}
+
+async function renderDetail() {
+  try {
+    setActive('detail');
+    setLoading('사이트 상세 로딩 중');
+    await loadCommonData();
+    const baseSite = currentSite();
+    const detailData = await fetchJson(API.site(baseSite.site_id), null);
+    const site = detailData?.result || baseSite;
+    if (site?.site_id) state.selectedSiteId = site.site_id;
+    const p = v24EnsureDetailPath();
+    const apiLevel = p.level === 'site' ? 'module' : p.level;
+    const levelData = await fetchJson(API.level(site.site_id, apiLevel), null);
+    const level = levelData?.result || {};
+    updateDetailTree(site);
+    const levelTitle = v24LevelTitle(p.level);
+    const selectedName = p.level === 'site' ? 'Site' : p.level === 'bank' ? `Bank ${String(p.bank).padStart(2,'0')}` : p.level === 'rack' ? `Rack ${String(p.rack).padStart(2,'0')}` : p.level === 'string' ? `String ${String(p.string).padStart(2,'0')}` : `Module ${String(p.module).padStart(2,'0')}`;
+    const c = v24Counts(site);
+    content.innerHTML = `
+    <div class="page detail-page v24-detail-page">
+      <section class="detail-left">
+        ${v24Breadcrumb(site, p)}
+        <div class="detail-title detail-title-row v24-title-row">
+          <button type="button" class="site-icon v24-site-click" onclick="v24SetDetailLevel('site')">▦</button>
+          <div><h1>${escapeHtml(site.site_name)} <span>›</span> ${escapeHtml(levelTitle)}</h1><p>${escapeHtml(site.region)} · ${escapeHtml(site.install_area || '-')} · ${escapeHtml(site.manufacturer)} · ${escapeHtml(site.bms_id || '')}</p></div>
+          <button type="button" class="v24-other-site-btn" onclick="v24GoSites()">다른 사이트 보기</button>
+        </div>
+        <div class="level-tabs v24-level-tabs">
+          ${['site','bank','rack','string','module'].map((lv) => `<button class="level-tab ${p.level===lv?'active':''}" onclick="v24SetDetailLevel('${lv}', ${p.bank}, ${p.rack}, ${p.string}, ${p.module})">${escapeHtml(v24LevelKo(lv))}</button>`).join('')}
+        </div>
+        <div class="detail-grid-top">
+          ${v24InfoCard('선택 계층', escapeHtml(selectedName))}
+          ${v24InfoCard('최대 이상 점수', score(v24ScoreValue(level.max_score ?? site.latest_score)))}
+          ${v24InfoCard('상태', badge(v24StatusKey(level.status || site.status)))}
+          ${v24InfoCard('최근 분석 시각', escapeHtml(v24FormatTime(site.last_analysis_time)))}
+        </div>
+        ${p.level === 'site' ? `<section class="panel v24-site-overview"><div class="panel-title"><span class="mini-icon">▦</span>사이트 정보</div><div class="v24-overview-grid">
+          ${v24InfoCard('사이트명', escapeHtml(site.site_name))}
+          ${v24InfoCard('BMS ID', escapeHtml(site.bms_id || '-'))}
+          ${v24InfoCard('지역 / 설치구역', `${escapeHtml(site.region || '-')} / ${escapeHtml(site.install_area || '-')}`)}
+          ${v24InfoCard('제조사', escapeHtml(site.manufacturer || '-'))}
+          ${v24InfoCard('Bank / Rack', `${c.banks} / ${c.racks}`)}
+          ${v24InfoCard('String / Module / Cell', `${c.strings} / ${c.modules} / ${c.cells}`)}
+        </div></section>` : ''}
+        ${v24EntityCards(site, p)}
+        ${p.level === 'module' ? v24ModuleCells(level) : ''}
+      </section>
+      ${v24RightPanel(site, level)}
+    </div>`;
+  } catch (error) {
+    console.error('[monitor] v24 renderDetail failed', error);
+    showError('사이트 상세 표시 중 오류가 발생했습니다.', error.stack || error.message);
+  }
+}
+
+function setLevel(level) {
+  v24SetDetailLevel(level);
+}
+window.setLevel = setLevel;
+
+function selectSite(siteId) {
+  state.selectedSiteId = siteId;
+  state.detailPath = { level: 'site', bank: 1, rack: 1, string: 1, module: 1, collapsed: false };
+  renderDetail();
+}
+window.selectSite = selectSite;
+
+function nav(page) {
+  if (page !== 'detail') removeDetailTree();
+  if (page === 'dashboard') return renderDashboard();
+  if (page === 'sites') return renderSites();
+  if (page === 'detail') return renderDetail();
+  if (page === 'history') return renderPlaceholder('실행 이력', '파이프라인 실행 이력 화면은 다음 단계에서 연결합니다.');
+  if (page === 'settings') return renderPlaceholder('설정', '알림, 모델, 사용자 설정 화면은 다음 단계에서 연결합니다.');
+}
+window.nav = nav;
+
+function bindNav() {
+  navItems.forEach((item) => {
+    item.addEventListener('click', () => nav(item.dataset.page));
+  });
+}
+
+async function init() {
+  try {
+    if (!content) return;
+    bindNav();
+    await fetchJson(API.system, null);
+    await renderDashboard();
+  } catch (error) {
+    console.error('[monitor] init failed', error);
+    showError('초기화 중 오류가 발생했습니다.', error.stack || error.message);
+  }
+}
+
+document.addEventListener('DOMContentLoaded', init);
+if (document.readyState !== 'loading') init();
+
